@@ -1,0 +1,24 @@
+apiVersion: resource.k8s.io/v1alpha3
+kind: ResourceClass
+metadata:
+  name: canhazgpu.class
+spec:
+  driverName: canhazgpu.com
+  parametersRef:
+    apiGroup: ""
+    kind: ConfigMap
+    name: canhazgpu-class-parameters
+    namespace: canhazgpu-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: canhazgpu-class-parameters
+  namespace: canhazgpu-system
+data:
+  parameters: |
+    {
+      "allowSpecificGPUs": true,
+      "defaultGPUCount": 1
+    }

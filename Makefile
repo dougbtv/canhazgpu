@@ -9,6 +9,8 @@ LDFLAGS=-ldflags "-X main.version=$(VERSION)"
 help:
 	@echo "Go build targets:"
 	@echo "  make build        - Build the canhazgpu binary"
+	@echo "  make build-k8s    - Build the k8shazgpu binary"
+	@echo "  make build-all    - Build all binaries (canhazgpu, k8shazgpu, controller, nodeagent)"
 	@echo "  make install      - Build and install to /usr/local/bin"
 	@echo "  make clean        - Clean build artifacts"
 	@echo "  make test         - Run tests (includes integration tests - may be slow)"
@@ -17,6 +19,15 @@ help:
 	@echo "  make test-integration - Run integration tests only (requires Redis/nvidia-smi)"
 	@echo "  make deps         - Download Go dependencies"
 	@echo "  make fmt          - go fmt"
+	@echo ""
+	@echo "Kubernetes targets:"
+	@echo "  make build-controller - Build DRA controller"
+	@echo "  make build-nodeagent  - Build node agent"
+	@echo "  make docker           - Build Docker images"
+	@echo "  make deploy           - Deploy to Kubernetes"
+	@echo "  make undeploy         - Remove from Kubernetes"
+	@echo "  make hello            - Run hello world example"
+	@echo "  make dev-setup        - Initialize Redis and GPU pool"
 	@echo ""
 	@echo "Documentation targets:"
 	@echo "  make docs-deps    - Install documentation dependencies"
@@ -43,7 +54,7 @@ install: build
 	@sudo cp -v ./autocomplete_canhazgpu.sh /etc/bash_completion.d/autocomplete_canhazgpu.sh
 
 .PHONY: clean
-clean:
+clean: clean-k8s
 	@echo "Cleaning build artifacts"
 	@rm -rf $(BUILD_DIR)
 
@@ -104,3 +115,83 @@ docs-preview:
 docs-clean:
 	@echo "Cleaning documentation build files"
 	@rm -rf site/
+
+# Kubernetes targets
+.PHONY: build-k8s
+build-k8s: deps
+	@echo "Building k8shazgpu"
+	@mkdir -p $(BUILD_DIR)
+	@go build $(LDFLAGS) -o $(BUILD_DIR)/k8shazgpu ./cmd/k8shazgpu
+
+.PHONY: build-controller
+build-controller:
+	@echo "Building DRA controller"
+	@$(MAKE) -C driver/dra/controller build
+
+.PHONY: build-nodeagent
+build-nodeagent:
+	@echo "Building node agent"
+	@$(MAKE) -C driver/dra/nodeagent build
+
+.PHONY: build-all
+build-all: build build-k8s build-controller build-nodeagent
+
+.PHONY: docker
+docker: build-controller build-nodeagent
+	@echo "Building Docker images"
+	@$(MAKE) -C driver/dra/controller docker
+	@$(MAKE) -C driver/dra/nodeagent docker
+
+.PHONY: clean-k8s
+clean-k8s:
+	@echo "Cleaning k8s build artifacts"
+	@$(MAKE) -C driver/dra/controller clean
+	@$(MAKE) -C driver/dra/nodeagent clean
+
+.PHONY: deploy
+deploy:
+	@echo "Deploying to Kubernetes"
+	@kubectl apply -f deploy/namespace.yaml
+	@kubectl apply -f deploy/rbac.yaml
+	@kubectl apply -f deploy/resourceclass.yaml
+	@kubectl apply -f deploy/controller.yaml
+	@kubectl apply -f deploy/daemonset.yaml
+
+.PHONY: undeploy
+undeploy:
+	@echo "Removing from Kubernetes"
+	@kubectl delete -f deploy/daemonset.yaml --ignore-not-found
+	@kubectl delete -f deploy/controller.yaml --ignore-not-found
+	@kubectl delete -f deploy/resourceclass.yaml --ignore-not-found
+	@kubectl delete -f deploy/rbac.yaml --ignore-not-found
+	@kubectl delete -f deploy/namespace.yaml --ignore-not-found
+
+.PHONY: hello
+hello: build-k8s
+	@echo "Running hello world example"
+	@cd examples/hello && ./run.sh
+
+.PHONY: dev-setup
+dev-setup: build
+	@echo "Setting up development environment"
+	@echo "Initializing GPU pool (assuming Redis is running)"
+	@$(BUILD_DIR)/$(BINARY_NAME) admin --gpus 1 --force
+
+.PHONY: validate
+validate:
+	@echo "=== k8shazgpu Validation Commands ==="
+	@echo "# Build all components:"
+	@echo "make build-all"
+	@echo ""
+	@echo "# Deploy to Kubernetes:"
+	@echo "make deploy"
+	@echo ""
+	@echo "# Test end-to-end:"
+	@echo "make hello"
+	@echo ""
+	@echo "# Check status:"
+	@echo "kubectl get resourceclaims"
+	@echo "kubectl get pods"
+	@echo ""
+	@echo "# Check interop with local canhazgpu:"
+	@echo "./build/canhazgpu status"

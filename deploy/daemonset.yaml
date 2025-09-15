@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: canhazgpu-nodeagent
+  namespace: canhazgpu-system
+  labels:
+    app: canhazgpu-nodeagent
+spec:
+  selector:
+    matchLabels:
+      app: canhazgpu-nodeagent
+  template:
+    metadata:
+      labels:
+        app: canhazgpu-nodeagent
+    spec:
+      serviceAccountName: canhazgpu-nodeagent
+      hostNetwork: true
+      containers:
+      - name: nodeagent
+        image: canhazgpu/nodeagent:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--port=8082"
+        - "--redis-host=localhost"
+        - "--redis-port=6379"
+        - "--redis-db=0"
+        - "--cdi-path=/var/run/cdi/canhazgpu.json"
+        - "--gpu-count=1"
+        - "-v=2"
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - containerPort: 8082
+          name: http
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: cdi-root
+          mountPath: /var/run/cdi
+        resources:
+          limits:
+            cpu: 200m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      volumes:
+      - name: cdi-root
+        hostPath:
+          path: /var/run/cdi
+          type: DirectoryOrCreate
+      tolerations:
+      # Allow running on control-plane nodes for single-node dev clusters
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: canhazgpu-nodeagent
+  namespace: canhazgpu-system
+  labels:
+    app: canhazgpu-nodeagent
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service
+  selector:
+    app: canhazgpu-nodeagent
+  ports:
+  - name: http
+    port: 8082
+    protocol: TCP
+    targetPort: http

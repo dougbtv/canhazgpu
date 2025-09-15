@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canhazgpu-controller
+  namespace: canhazgpu-system
+  labels:
+    app: canhazgpu-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canhazgpu-controller
+  template:
+    metadata:
+      labels:
+        app: canhazgpu-controller
+    spec:
+      serviceAccountName: canhazgpu-controller
+      containers:
+      - name: controller
+        image: canhazgpu/controller:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--driver-name=canhazgpu.com"
+        - "--node-agent-endpoint=http://canhazgpu-nodeagent:8082"
+        - "--metrics-bind-address=:8080"
+        - "--health-probe-bind-address=:8081"
+        - "--leader-elect=false"
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: canhazgpu-controller
+  namespace: canhazgpu-system
+  labels:
+    app: canhazgpu-controller
+spec:
+  selector:
+    app: canhazgpu-controller
+  ports:
+  - name: metrics
+    port: 8080
+    protocol: TCP
+    targetPort: metrics
+  - name: health
+    port: 8081
+    protocol: TCP
+    targetPort: health

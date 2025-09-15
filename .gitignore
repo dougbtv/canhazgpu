@@ -24,3 +24,6 @@ canhazgpu
 
 # Goreleaser
 dist/
+
+# reference code
+reference/
