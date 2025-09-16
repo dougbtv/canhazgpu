@@ -23,6 +23,7 @@ help:
 	@echo "Kubernetes targets:"
 	@echo "  make build-controller - Build DRA controller"
 	@echo "  make build-nodeagent  - Build node agent"
+	@echo "  make build-kubeletplugin - Build kubelet plugin"
 	@echo "  make docker           - Build Docker images"
 	@echo "  make deploy           - Deploy to Kubernetes"
 	@echo "  make undeploy         - Remove from Kubernetes"
@@ -133,17 +134,24 @@ build-nodeagent:
 	@echo "Building node agent"
 	@$(MAKE) -C driver/dra/nodeagent build
 
+.PHONY: build-kubeletplugin
+build-kubeletplugin:
+	@echo "Building kubelet plugin"
+	@$(MAKE) -C driver/dra/kubeletplugin build
+
 .PHONY: build-all
-build-all: build build-k8s build-controller build-nodeagent
+build-all: build build-k8s build-controller build-nodeagent build-kubeletplugin
 
 .PHONY: docker
-docker: build-controller build-nodeagent
+docker: build-controller build-nodeagent build-kubeletplugin
 	@echo "Building Docker images"
 	@$(MAKE) -C driver/dra/controller docker
 	@$(MAKE) -C driver/dra/nodeagent docker
+	@$(MAKE) -C driver/dra/kubeletplugin docker
 	@echo "Pushing Docker images"
 	@$(MAKE) -C driver/dra/controller push
 	@$(MAKE) -C driver/dra/nodeagent push
+	@$(MAKE) -C driver/dra/kubeletplugin push
 
 .PHONY: clean-k8s
 clean-k8s:
@@ -159,10 +167,12 @@ deploy:
 	@kubectl apply -f deploy/resourceclass.yaml
 	@kubectl apply -f deploy/controller.yaml
 	@kubectl apply -f deploy/daemonset.yaml
+	@kubectl apply -f deploy/kubeletplugin.yaml
 
 .PHONY: undeploy
 undeploy:
 	@echo "Removing from Kubernetes"
+	@kubectl delete -f deploy/kubeletplugin.yaml --ignore-not-found
 	@kubectl delete -f deploy/daemonset.yaml --ignore-not-found
 	@kubectl delete -f deploy/controller.yaml --ignore-not-found
 	@kubectl delete -f deploy/resourceclass.yaml --ignore-not-found

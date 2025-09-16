@@ -1,14 +1,11 @@
-apiVersion: resource.k8s.io/v1alpha3
-kind: ResourceClass
+apiVersion: resource.k8s.io/v1beta1
+kind: DeviceClass
 metadata:
   name: canhazgpu.class
 spec:
-  driverName: canhazgpu.com
-  parametersRef:
-    apiGroup: ""
-    kind: ConfigMap
-    name: canhazgpu-class-parameters
-    namespace: canhazgpu-system
+  selectors:
+  - cel:
+      expression: 'device.driver == "canhazgpu.com"'
 
 ---
 apiVersion: v1

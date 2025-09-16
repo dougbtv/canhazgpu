@@ -8,24 +8,24 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	resourceapi "k8s.io/api/resource/v1alpha3"
+	resourceapi "k8s.io/api/resource/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	resourceclient "k8s.io/client-go/kubernetes/typed/resource/v1alpha3"
+	resourceclient "k8s.io/client-go/kubernetes/typed/resource/v1beta1"
 )
 
 const (
-	ResourceClassName = "canhazgpu.class"
-	DriverName       = "canhazgpu.com"
+	DeviceClassName = "canhazgpu.class"
+	DriverName      = "canhazgpu.com"
 )
 
 type Client struct {
 	clientset      kubernetes.Interface
-	resourceClient resourceclient.ResourceV1alpha3Interface
+	resourceClient resourceclient.ResourceV1beta1Interface
 	namespace      string
 }
 
@@ -65,15 +65,15 @@ func getKubeConfig(kubeContext string) (*rest.Config, error) {
 }
 
 func (c *Client) CreateResourceClaim(ctx context.Context, req *ReservationRequest) (*resourceapi.ResourceClaim, error) {
-	// Create ResourceClaimSpec
+	// Create ResourceClaimSpec for v1beta1 API
 	spec := resourceapi.ResourceClaimSpec{
 		Devices: resourceapi.DeviceClaim{
 			Requests: []resourceapi.DeviceRequest{
 				{
-					Name:               "gpu-request",
-					DeviceClassName:    ResourceClassName,
-					AllocationMode:     resourceapi.DeviceAllocationModeExactCount,
-					Count:              int64(req.GPUCount),
+					Name:            "gpu-request",
+					DeviceClassName: DeviceClassName,
+					AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+					Count:           int64(req.GPUCount),
 				},
 			},
 		},

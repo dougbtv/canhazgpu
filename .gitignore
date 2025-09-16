@@ -27,3 +27,7 @@ dist/
 
 # reference code
 reference/
+
+# binaries
+driver/dra/nodeagent/canhazgpu-nodeagent
+driver/dra/kubeletplugin/canhazgpu-kubeletplugin
