@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,10 +14,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/russellb/canhazgpu/driver/dra/api"
 )
+
+const FinalizerName = "canhazgpu.com/finalizer"
 
 type ResourceClaimController struct {
 	client.Client
@@ -30,7 +36,12 @@ func (r *ResourceClaimController) Reconcile(ctx context.Context, req ctrl.Reques
 	var claim resourceapi.ResourceClaim
 	if err := r.Get(ctx, req.NamespacedName, &claim); err != nil {
 		if errors.IsNotFound(err) {
-			// ResourceClaim was deleted, handle cleanup if needed
+			// ResourceClaim was deleted, handle cleanup
+			logger.Info("ResourceClaim deleted, performing cleanup", "claimUID", req.Name)
+			if err := r.handleResourceClaimDeletion(ctx, req.Name); err != nil {
+				logger.Error(err, "failed to cleanup deleted ResourceClaim", "claimUID", req.Name)
+				return ctrl.Result{RequeueAfter: time.Minute}, err
+			}
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "unable to fetch ResourceClaim")
@@ -40,6 +51,35 @@ func (r *ResourceClaimController) Reconcile(ctx context.Context, req ctrl.Reques
 	// Only handle claims that reference our ResourceClass
 	// For now, we'll handle all claims in this simplified Phase 1 implementation
 	// TODO: Add proper ResourceClass filtering in Phase 2
+
+	// Check if claim is being deleted
+	if !claim.DeletionTimestamp.IsZero() {
+		// ResourceClaim is being deleted, handle deallocation if our finalizer is present
+		if controllerutil.ContainsFinalizer(&claim, FinalizerName) {
+			logger.Info("ResourceClaim being deleted, performing deallocation", "claim", claim.Name, "claimUID", string(claim.UID))
+			if err := r.handleResourceClaimDeletion(ctx, string(claim.UID)); err != nil {
+				logger.Error(err, "failed to deallocate resources during deletion", "claim", claim.Name)
+				return ctrl.Result{RequeueAfter: time.Minute}, err
+			}
+
+			// Remove our finalizer to allow deletion to proceed
+			controllerutil.RemoveFinalizer(&claim, FinalizerName)
+			if err := r.Update(ctx, &claim); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Add our finalizer if not present
+	if !controllerutil.ContainsFinalizer(&claim, FinalizerName) {
+		controllerutil.AddFinalizer(&claim, FinalizerName)
+		if err := r.Update(ctx, &claim); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Requeue to process the updated resource
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	// Check if claim is already allocated
 	if claim.Status.Allocation != nil {
@@ -167,20 +207,114 @@ func (r *ResourceClaimController) selectNode(ctx context.Context) (*corev1.Node,
 }
 
 func (r *ResourceClaimController) requestAllocationFromNode(ctx context.Context, nodeName string, req *api.AllocationRequest) (*api.AllocationResponse, error) {
-	// For simplicity, we'll communicate directly with node agent via HTTP
-	// In a real implementation, this would use gRPC or a more robust mechanism
+	// Communicate with node agent via HTTP
+	nodeAgentURL := fmt.Sprintf("http://%s:8082/allocate", nodeName)
 
-	// TODO: Implement HTTP client call to node agent
-	// For now, return a mock response
-	return &api.AllocationResponse{
-		Success:       true,
-		AllocatedGPUs: []int{0}, // Mock allocation
-		NodeName:      nodeName,
-	}, nil
+	// Convert request to JSON
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal allocation request: %w", err)
+	}
+
+	// Make HTTP request to node agent
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", nodeAgentURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make HTTP request to node agent: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("node agent returned error status: %d", resp.StatusCode)
+	}
+
+	// Parse response
+	var allocResp api.AllocationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&allocResp); err != nil {
+		return nil, fmt.Errorf("failed to decode allocation response: %w", err)
+	}
+
+	if !allocResp.Success {
+		return nil, fmt.Errorf("node agent allocation failed: %s", allocResp.Error)
+	}
+
+	return &allocResp, nil
 }
 
 func (r *ResourceClaimController) requestDeallocationFromNode(ctx context.Context, nodeName string, req *api.DeallocationRequest) error {
-	// TODO: Implement HTTP client call to node agent for deallocation
+	// Communicate with node agent via HTTP
+	nodeAgentURL := fmt.Sprintf("http://%s:8082/deallocate", nodeName)
+
+	// Convert request to JSON
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal deallocation request: %w", err)
+	}
+
+	// Make HTTP request to node agent
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", nodeAgentURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to make HTTP request to node agent: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("node agent returned error status: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func (r *ResourceClaimController) handleResourceClaimDeletion(ctx context.Context, claimUID string) error {
+	logger := log.FromContext(ctx)
+
+	// Get all nodes to attempt deallocation from each one
+	// Since we don't track which node has the allocation, we'll try all nodes
+	var nodes corev1.NodeList
+	if err := r.List(ctx, &nodes); err != nil {
+		return fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	deallocReq := &api.DeallocationRequest{
+		ClaimUID: claimUID,
+	}
+
+	// Try deallocation on all ready nodes
+	for _, node := range nodes.Items {
+		// Check if node is ready
+		ready := false
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+				ready = true
+				break
+			}
+		}
+
+		if !ready {
+			continue
+		}
+
+		// Attempt deallocation - ignore errors since the claim might not be allocated on this node
+		if err := r.requestDeallocationFromNode(ctx, node.Name, deallocReq); err != nil {
+			logger.V(1).Info("deallocation attempt failed", "node", node.Name, "error", err.Error())
+		} else {
+			logger.Info("successfully deallocated resources", "claimUID", claimUID, "node", node.Name)
+		}
+	}
+
 	return nil
 }
 

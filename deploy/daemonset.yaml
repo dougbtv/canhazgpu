@@ -20,10 +20,11 @@ spec:
       - name: nodeagent
         image: quay.io/dosmith/k8shazgpu-nodeagent:latest
         imagePullPolicy: Always
+        securityContext:
+          privileged: true
         args:
         - "--port=8082"
-        - "--redis-host=localhost"
-        - "--redis-port=6379"
+        - "--redis-socket=/host/run/redis/redis.sock"
         - "--redis-db=0"
         - "--cdi-path=/var/run/cdi/canhazgpu.json"
         - "--gpu-count=1"
@@ -52,6 +53,9 @@ spec:
         volumeMounts:
         - name: cdi-root
           mountPath: /var/run/cdi
+        - name: redis-sock
+          mountPath: /host/run/redis/redis.sock
+          readOnly: true
         resources:
           limits:
             cpu: 200m
@@ -64,6 +68,10 @@ spec:
         hostPath:
           path: /var/run/cdi
           type: DirectoryOrCreate
+      - name: redis-sock
+        hostPath:
+          path: /run/redis/redis.sock
+          type: Socket
       tolerations:
       # Allow running on control-plane nodes for single-node dev clusters
       - key: node-role.kubernetes.io/control-plane

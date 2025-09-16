@@ -25,6 +25,17 @@ func NewClient(redisHost string, redisPort int, redisDB int) *Client {
 	return &Client{rdb: rdb}
 }
 
+// NewClientWithSocket creates a new Redis client using Unix socket
+func NewClientWithSocket(socketPath string, redisDB int) *Client {
+	rdb := redis.NewClient(&redis.Options{
+		Network: "unix",
+		Addr:    socketPath,
+		DB:      redisDB,
+	})
+
+	return &Client{rdb: rdb}
+}
+
 func (c *Client) Close() error {
 	return c.rdb.Close()
 }

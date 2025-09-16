@@ -18,13 +18,14 @@ import (
 
 func main() {
 	var (
-		port       = flag.Int("port", 8082, "HTTP server port")
-		redisHost  = flag.String("redis-host", "localhost", "Redis host")
-		redisPort  = flag.Int("redis-port", 6379, "Redis port")
-		redisDB    = flag.Int("redis-db", 0, "Redis database")
-		cdiPath    = flag.String("cdi-path", "/var/run/cdi/canhazgpu.json", "Path to CDI spec file")
-		gpuCount   = flag.Int("gpu-count", 0, "Number of GPUs (auto-detect if 0)")
-		nodeName   = flag.String("node-name", "", "Kubernetes node name")
+		port         = flag.Int("port", 8082, "HTTP server port")
+		redisHost    = flag.String("redis-host", "localhost", "Redis host")
+		redisPort    = flag.Int("redis-port", 6379, "Redis port")
+		redisSocket  = flag.String("redis-socket", "", "Redis Unix socket path (overrides host/port)")
+		redisDB      = flag.Int("redis-db", 0, "Redis database")
+		cdiPath      = flag.String("cdi-path", "/var/run/cdi/canhazgpu.json", "Path to CDI spec file")
+		gpuCount     = flag.Int("gpu-count", 0, "Number of GPUs (auto-detect if 0)")
+		nodeName     = flag.String("node-name", "", "Kubernetes node name")
 	)
 
 	klog.InitFlags(nil)
@@ -37,8 +38,15 @@ func main() {
 		}
 	}
 
-	// Create Redis client
-	redisClient := redisstate.NewClient(*redisHost, *redisPort, *redisDB)
+	// Create Redis client (prefer socket over network)
+	var redisClient *redisstate.Client
+	if *redisSocket != "" {
+		klog.Infof("Connecting to Redis via socket: %s", *redisSocket)
+		redisClient = redisstate.NewClientWithSocket(*redisSocket, *redisDB)
+	} else {
+		klog.Infof("Connecting to Redis via network: %s:%d", *redisHost, *redisPort)
+		redisClient = redisstate.NewClient(*redisHost, *redisPort, *redisDB)
+	}
 	defer redisClient.Close()
 
 	// Test Redis connection
