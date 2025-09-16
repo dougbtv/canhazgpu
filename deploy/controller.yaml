@@ -18,8 +18,8 @@ spec:
       serviceAccountName: canhazgpu-controller
       containers:
       - name: controller
-        image: canhazgpu/controller:latest
-        imagePullPolicy: IfNotPresent
+        image: quay.io/dosmith/k8shazgpu-controller:latest
+        imagePullPolicy: Always
         args:
         - "--driver-name=canhazgpu.com"
         - "--node-agent-endpoint=http://canhazgpu-nodeagent:8082"

@@ -1,6 +1,7 @@
 BINARY_NAME=canhazgpu-controller
-DOCKER_IMAGE=canhazgpu/controller
+DOCKER_IMAGE=quay.io/dosmith/k8shazgpu-controller
 VERSION?=latest
+CONTAINER_RUNTIME?=podman
 
 .PHONY: build
 build:
@@ -8,7 +9,7 @@ build:
 
 .PHONY: docker
 docker: build
-	docker build -t $(DOCKER_IMAGE):$(VERSION) .
+	$(CONTAINER_RUNTIME) build -t $(DOCKER_IMAGE):$(VERSION) .
 
 .PHONY: clean
 clean:
@@ -17,3 +18,6 @@ clean:
 .PHONY: test
 test:
 	go test ./...
+
+push: docker
+	$(CONTAINER_RUNTIME) push $(DOCKER_IMAGE):$(VERSION)

@@ -18,8 +18,8 @@ spec:
       hostNetwork: true
       containers:
       - name: nodeagent
-        image: canhazgpu/nodeagent:latest
-        imagePullPolicy: IfNotPresent
+        image: quay.io/dosmith/k8shazgpu-nodeagent:latest
+        imagePullPolicy: Always
         args:
         - "--port=8082"
         - "--redis-host=localhost"

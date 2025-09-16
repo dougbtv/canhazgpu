@@ -141,6 +141,9 @@ docker: build-controller build-nodeagent
 	@echo "Building Docker images"
 	@$(MAKE) -C driver/dra/controller docker
 	@$(MAKE) -C driver/dra/nodeagent docker
+	@echo "Pushing Docker images"
+	@$(MAKE) -C driver/dra/controller push
+	@$(MAKE) -C driver/dra/nodeagent push
 
 .PHONY: clean-k8s
 clean-k8s:
