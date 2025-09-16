@@ -43,3 +43,27 @@ type ResourceClassParameters struct {
 	AllowSpecificGPUs bool `json:"allowSpecificGPUs,omitempty"`
 	DefaultGPUCount   int  `json:"defaultGPUCount,omitempty"`
 }
+
+// GPUSummary represents a summary of GPU availability across the cluster
+type GPUSummary struct {
+	TotalGPUs     int
+	AvailableGPUs int
+	AllocatedGPUs int
+	Nodes         []NodeGPUInfo
+}
+
+// NodeGPUInfo represents GPU information for a specific node
+type NodeGPUInfo struct {
+	NodeName      string
+	TotalGPUs     int
+	AvailableGPUs []int
+	AllocatedGPUs []AllocatedGPUInfo
+}
+
+// AllocatedGPUInfo represents information about an allocated GPU
+type AllocatedGPUInfo struct {
+	ID        int
+	ClaimUID  string
+	PodName   string
+	Namespace string
+}

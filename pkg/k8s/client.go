@@ -2,7 +2,9 @@ package k8s
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -93,7 +95,10 @@ func (c *Client) CreateResourceClaim(ctx context.Context, req *ReservationReques
 }
 
 func (c *Client) WaitForAllocation(ctx context.Context, claimName string) (*AllocationResult, error) {
-	timeout := 5 * time.Minute
+	return c.WaitForAllocationWithTimeout(ctx, claimName, 5*time.Minute)
+}
+
+func (c *Client) WaitForAllocationWithTimeout(ctx context.Context, claimName string, timeout time.Duration) (*AllocationResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -324,4 +329,165 @@ func (c *Client) DeleteResourceClaim(ctx context.Context, claimName string) erro
 
 func (c *Client) DeletePod(ctx context.Context, podName string) error {
 	return c.clientset.CoreV1().Pods(c.namespace).Delete(ctx, podName, metav1.DeleteOptions{})
+}
+
+func (c *Client) GetGPUSummary(ctx context.Context) (*GPUSummary, error) {
+	// For now, calculate GPU summary from ResourceClaims instead of querying node agents
+	// This is more reliable when running outside the cluster
+	return c.getGPUSummaryFromClaims(ctx)
+}
+
+func (c *Client) getGPUSummaryFromClaims(ctx context.Context) (*GPUSummary, error) {
+	// Get all ResourceClaims across all namespaces
+	claims, err := c.resourceClient.ResourceClaims("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ResourceClaims: %w", err)
+	}
+
+	// Get nodes to understand total GPU capacity
+	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	summary := &GPUSummary{}
+	nodeGPUMap := make(map[string]*NodeGPUInfo)
+
+	// Initialize nodes - assume 1 GPU per ready node for now
+	// In a real implementation, this should come from node labels or node agent query
+	for _, node := range nodes.Items {
+		ready := false
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+				ready = true
+				break
+			}
+		}
+
+		if ready {
+			nodeInfo := &NodeGPUInfo{
+				NodeName:      node.Name,
+				TotalGPUs:     1, // Hardcoded for now - should be configurable
+				AvailableGPUs: []int{0}, // Start with GPU 0 available
+				AllocatedGPUs: []AllocatedGPUInfo{},
+			}
+			nodeGPUMap[node.Name] = nodeInfo
+			summary.TotalGPUs++
+		}
+	}
+
+	// Process allocated claims
+	for _, claim := range claims.Items {
+		if claim.Status.Allocation != nil {
+			// Parse allocation to get node and GPU info
+			result, err := parseAllocationResult(claim.Status.Allocation)
+			if err != nil {
+				continue
+			}
+
+			if nodeInfo, exists := nodeGPUMap[result.NodeName]; exists {
+				// Remove allocated GPUs from available list
+				for _, allocatedGPU := range result.AllocatedGPUs {
+					// Remove from available
+					for i, availGPU := range nodeInfo.AvailableGPUs {
+						if availGPU == allocatedGPU {
+							nodeInfo.AvailableGPUs = append(nodeInfo.AvailableGPUs[:i], nodeInfo.AvailableGPUs[i+1:]...)
+							break
+						}
+					}
+
+					// Add to allocated
+					allocInfo := AllocatedGPUInfo{
+						ID:        allocatedGPU,
+						ClaimUID:  string(claim.UID),
+						Namespace: claim.Namespace,
+					}
+
+					// Try to find associated Pod
+					pods, err := c.clientset.CoreV1().Pods(claim.Namespace).List(ctx, metav1.ListOptions{})
+					if err == nil {
+						for _, pod := range pods.Items {
+							for _, claimRef := range pod.Spec.ResourceClaims {
+								if claimRef.ResourceClaimName != nil && *claimRef.ResourceClaimName == claim.Name {
+									allocInfo.PodName = pod.Name
+									break
+								}
+							}
+						}
+					}
+
+					nodeInfo.AllocatedGPUs = append(nodeInfo.AllocatedGPUs, allocInfo)
+				}
+			}
+		}
+	}
+
+	// Calculate totals and add nodes to summary
+	for _, nodeInfo := range nodeGPUMap {
+		summary.Nodes = append(summary.Nodes, *nodeInfo)
+		summary.AvailableGPUs += len(nodeInfo.AvailableGPUs)
+		summary.AllocatedGPUs += len(nodeInfo.AllocatedGPUs)
+	}
+
+	return summary, nil
+}
+
+func (c *Client) getNodeGPUInfo(ctx context.Context, nodeName string) (*NodeGPUInfo, error) {
+	return c.getNodeGPUInfoByIP(ctx, nodeName, nodeName)
+}
+
+func (c *Client) getNodeGPUInfoByIP(ctx context.Context, nodeName, nodeIP string) (*NodeGPUInfo, error) {
+	// Make HTTP request to node agent
+	nodeAgentURL := fmt.Sprintf("http://%s:8082/status", nodeIP)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, "GET", nodeAgentURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query node agent: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("node agent returned status %d", resp.StatusCode)
+	}
+
+	// Parse response - need to define the structure based on node agent API
+	var nodeStatus struct {
+		NodeName      string `json:"nodeName"`
+		TotalGPUs     int    `json:"totalGPUs"`
+		AvailableGPUs []int  `json:"availableGPUs"`
+		AllocatedGPUs []struct {
+			ID        int    `json:"id"`
+			ClaimUID  string `json:"claimUID"`
+			PodName   string `json:"podName,omitempty"`
+			Namespace string `json:"namespace"`
+		} `json:"allocatedGPUs"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&nodeStatus); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	nodeInfo := &NodeGPUInfo{
+		NodeName:      nodeStatus.NodeName,
+		TotalGPUs:     nodeStatus.TotalGPUs,
+		AvailableGPUs: nodeStatus.AvailableGPUs,
+	}
+
+	// Convert allocated GPUs
+	for _, gpu := range nodeStatus.AllocatedGPUs {
+		nodeInfo.AllocatedGPUs = append(nodeInfo.AllocatedGPUs, AllocatedGPUInfo{
+			ID:        gpu.ID,
+			ClaimUID:  gpu.ClaimUID,
+			PodName:   gpu.PodName,
+			Namespace: gpu.Namespace,
+		})
+	}
+
+	return nodeInfo, nil
 }

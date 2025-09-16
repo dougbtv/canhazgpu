@@ -70,6 +70,41 @@ func showClaimStatus(ctx context.Context, client *k8s.Client, claimName string) 
 }
 
 func showAllStatus(ctx context.Context, client *k8s.Client) error {
+	// Get GPU summary first
+	summary, err := client.GetGPUSummary(ctx)
+	if err != nil {
+		fmt.Printf("Warning: failed to get GPU summary: %v\n\n", err)
+	} else {
+		fmt.Printf("GPU Summary:\n")
+		fmt.Printf("  Total GPUs: %d\n", summary.TotalGPUs)
+		fmt.Printf("  Available: %d\n", summary.AvailableGPUs)
+		fmt.Printf("  Allocated: %d\n", summary.AllocatedGPUs)
+		fmt.Println()
+
+		// Show per-node details
+		for _, node := range summary.Nodes {
+			fmt.Printf("Node %s:\n", node.NodeName)
+			fmt.Printf("  Total GPUs: %d\n", node.TotalGPUs)
+			fmt.Printf("  Available GPUs: %s\n", formatGPUList(node.AvailableGPUs))
+			if len(node.AllocatedGPUs) > 0 {
+				fmt.Printf("  Allocated GPUs:\n")
+				for _, gpu := range node.AllocatedGPUs {
+					claimName := "unknown"
+					if gpu.ClaimUID != "" {
+						// Try to find ResourceClaim name from UID
+						claimName = gpu.ClaimUID[:8] + "..." // Show first 8 chars of UID
+					}
+					fmt.Printf("    GPU %d: %s", gpu.ID, claimName)
+					if gpu.PodName != "" {
+						fmt.Printf(" (Pod: %s)", gpu.PodName)
+					}
+					fmt.Println()
+				}
+			}
+			fmt.Println()
+		}
+	}
+
 	statuses, err := client.ListClaimStatuses(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list claim statuses: %w", err)

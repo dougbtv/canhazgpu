@@ -69,7 +69,8 @@ The Pod will have access to the reserved GPUs via CUDA_VISIBLE_DEVICES environme
 
 		fmt.Printf("Waiting for allocation of claim %s...\n", claim.Name)
 
-		allocated, err := client.WaitForAllocation(ctx, claim.Name)
+		// Use shorter timeout for allocation to avoid hanging indefinitely
+		allocated, err := client.WaitForAllocationWithTimeout(ctx, claim.Name, 30*time.Second)
 		if err != nil {
 			return fmt.Errorf("failed waiting for allocation: %w", err)
 		}
