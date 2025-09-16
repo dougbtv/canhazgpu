@@ -70,8 +70,15 @@ The Pod will have access to the reserved GPUs via CUDA_VISIBLE_DEVICES environme
 		fmt.Printf("Waiting for allocation of claim %s...\n", claim.Name)
 
 		// Use shorter timeout for allocation to avoid hanging indefinitely
-		allocated, err := client.WaitForAllocationWithTimeout(ctx, claim.Name, 30*time.Second)
+		allocated, err := client.WaitForAllocationWithTimeout(ctx, claim.Name, 5*time.Second)
 		if err != nil {
+			// Check GPU availability and provide helpful error message
+			if summary, summaryErr := client.GetGPUSummary(ctx); summaryErr == nil {
+				if summary.AvailableGPUs == 0 {
+					return fmt.Errorf("allocation failed: all %d GPUs in the cluster are currently in use\n\nCurrent GPU usage:\n%s\n\nTip: Use 'k8shazgpu status' to see detailed GPU allocation",
+						summary.TotalGPUs, formatGPUSummaryForError(summary))
+				}
+			}
 			return fmt.Errorf("failed waiting for allocation: %w", err)
 		}
 
@@ -125,4 +132,27 @@ func init() {
 func generateRandomSuffix() int {
 	// Simple random suffix for auto-generated names
 	return int(time.Now().Unix() % 10000)
+}
+
+func formatGPUSummaryForError(summary *k8s.GPUSummary) string {
+	var result strings.Builder
+	for _, node := range summary.Nodes {
+		result.WriteString(fmt.Sprintf("  Node %s: %d/%d GPUs allocated",
+			node.NodeName, len(node.AllocatedGPUs), node.TotalGPUs))
+		if len(node.AllocatedGPUs) > 0 {
+			result.WriteString(" (")
+			for i, gpu := range node.AllocatedGPUs {
+				if i > 0 {
+					result.WriteString(", ")
+				}
+				result.WriteString(fmt.Sprintf("GPU%d", gpu.ID))
+				if gpu.PodName != "" {
+					result.WriteString(fmt.Sprintf(":%s", gpu.PodName))
+				}
+			}
+			result.WriteString(")")
+		}
+		result.WriteString("\n")
+	}
+	return result.String()
 }

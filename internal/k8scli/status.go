@@ -55,7 +55,7 @@ func showClaimStatus(ctx context.Context, client *k8s.Client, claimName string) 
 
 	if status.Allocated {
 		fmt.Printf("  Node: %s\n", status.NodeName)
-		fmt.Printf("  GPUs: %s\n", formatGPUList(status.AllocatedGPUs))
+		fmt.Printf("  GPU IDs: %s\n", formatGPUList(status.AllocatedGPUs))
 	}
 
 	if status.PodName != "" {
@@ -123,7 +123,7 @@ func showAllStatus(ctx context.Context, client *k8s.Client) error {
 
 		if status.Allocated {
 			fmt.Printf("  Node: %s\n", status.NodeName)
-			fmt.Printf("  GPUs: %s\n", formatGPUList(status.AllocatedGPUs))
+			fmt.Printf("  GPU IDs: %s\n", formatGPUList(status.AllocatedGPUs))
 		}
 
 		if status.PodName != "" {
