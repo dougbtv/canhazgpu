@@ -150,13 +150,12 @@ func parseAllocationResult(allocation *resourceapi.AllocationResult) (*Allocatio
 		}
 	}
 
-	// Extract GPU IDs from CDI device references
+	// Extract GPU IDs from allocation results
 	for _, device := range allocation.Devices.Results {
-		if strings.HasPrefix(device.Driver, DriverName) {
-			// Parse GPU ID from device name like "canhazgpu.com/gpu0"
-			parts := strings.Split(device.Device, "/")
-			if len(parts) >= 2 {
-				gpuIDStr := strings.TrimPrefix(parts[1], "gpu")
+		if device.Driver == DriverName {
+			// Parse GPU ID from device name like "gpu0"
+			if strings.HasPrefix(device.Device, "gpu") {
+				gpuIDStr := strings.TrimPrefix(device.Device, "gpu")
 				if gpuID, err := strconv.Atoi(gpuIDStr); err == nil {
 					result.AllocatedGPUs = append(result.AllocatedGPUs, gpuID)
 				}
