@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -313,6 +314,100 @@ func (r *ResourceClaimController) handleResourceClaimDeletion(ctx context.Contex
 		} else {
 			logger.Info("successfully deallocated resources", "claimUID", claimUID, "node", node.Name)
 		}
+	}
+
+	return nil
+}
+
+func (r *ResourceClaimController) AutoReconcilePods(ctx context.Context) error {
+	// Find allocated ResourceClaims that don't have associated Pods yet
+	var claims resourceapi.ResourceClaimList
+	if err := r.List(ctx, &claims); err != nil {
+		return fmt.Errorf("failed to list ResourceClaims: %w", err)
+	}
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods); err != nil {
+		return fmt.Errorf("failed to list Pods: %w", err)
+	}
+
+	// Create a map of ResourceClaim names that already have Pods
+	claimsWithPods := make(map[string]bool)
+	for _, pod := range pods.Items {
+		for _, claimRef := range pod.Spec.ResourceClaims {
+			if claimRef.ResourceClaimName != nil {
+				claimsWithPods[*claimRef.ResourceClaimName] = true
+			}
+		}
+	}
+
+	// Check each allocated claim
+	for _, claim := range claims.Items {
+		// Skip if claim is not allocated
+		if claim.Status.Allocation == nil {
+			continue
+		}
+
+		// Skip if claim already has a Pod
+		if claimsWithPods[claim.Name] {
+			continue
+		}
+
+		// Skip if claim doesn't have pod-spec annotation
+		podSpecJSON, exists := claim.Annotations["k8shazgpu.com/pod-spec"]
+		if !exists {
+			continue
+		}
+
+		// Parse Pod spec from annotation
+		var podSpec struct {
+			Image   string   `json:"image"`
+			Command []string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(podSpecJSON), &podSpec); err != nil {
+			ctrl.Log.WithName("auto-reconciler").Error(err, "failed to parse pod spec", "claim", claim.Name)
+			continue
+		}
+
+		// Create Pod for this claim
+		ctrl.Log.WithName("auto-reconciler").Info("creating Pod for allocated claim", "claim", claim.Name)
+
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      claim.Name + "-pod",
+				Namespace: claim.Namespace,
+			},
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers: []corev1.Container{
+					{
+						Name:    "gpu-workload",
+						Image:   podSpec.Image,
+						Command: podSpec.Command,
+					},
+				},
+				ResourceClaims: []corev1.PodResourceClaim{
+					{
+						Name: "gpu-claim",
+						ResourceClaimName: &claim.Name,
+					},
+				},
+			},
+		}
+
+		// Add resource claim reference to container
+		pod.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{
+			{
+				Name: "gpu-claim",
+			},
+		}
+
+		if err := r.Create(ctx, pod); err != nil {
+			ctrl.Log.WithName("auto-reconciler").Error(err, "failed to create Pod", "claim", claim.Name, "pod", pod.Name)
+			continue
+		}
+
+		ctrl.Log.WithName("auto-reconciler").Info("created Pod for allocated claim", "claim", claim.Name, "pod", pod.Name)
 	}
 
 	return nil

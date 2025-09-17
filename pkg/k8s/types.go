@@ -67,3 +67,9 @@ type AllocatedGPUInfo struct {
 	PodName   string
 	Namespace string
 }
+
+// PodSpec represents the specification for creating a Pod
+type PodSpec struct {
+	Image   string   `json:"image"`
+	Command []string `json:"command"`
+}

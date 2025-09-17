@@ -164,24 +164,44 @@ func (c *Client) GetAvailableGPUs(ctx context.Context) ([]int, error) {
 	var available []int
 
 	for i := 0; i < gpuCount; i++ {
-		key := fmt.Sprintf("%sgpu:%d", types.RedisKeyPrefix, i)
-		data, err := c.rdb.Get(ctx, key).Result()
-		if err == redis.Nil {
-			// GPU not in Redis = available
-			available = append(available, i)
-			continue
-		}
-		if err != nil {
+		// Check both K8s namespace and host canhazgpu reservations
+		k8sKey := fmt.Sprintf("%sgpu:%d", types.RedisKeyPrefix, i)
+		hostKey := fmt.Sprintf("canhazgpu:gpu:%d", i)
+
+		// Check K8s reservation first
+		k8sData, k8sErr := c.rdb.Get(ctx, k8sKey).Result()
+		if k8sErr != nil && k8sErr != redis.Nil {
 			continue // Skip on error
 		}
 
-		var state types.GPUState
-		if err := json.Unmarshal([]byte(data), &state); err != nil {
-			continue // Skip malformed data
+		// Check host canhazgpu reservation
+		hostData, hostErr := c.rdb.Get(ctx, hostKey).Result()
+		if hostErr != nil && hostErr != redis.Nil {
+			continue // Skip on error
 		}
 
-		// Check if GPU is truly available
-		if state.User == "" && state.Type == "" {
+		// GPU is available only if both K8s and host show it as available
+		k8sAvailable := (k8sErr == redis.Nil)
+		hostAvailable := (hostErr == redis.Nil)
+
+		// If K8s has data, check if it's truly available
+		if !k8sAvailable {
+			var k8sState types.GPUState
+			if err := json.Unmarshal([]byte(k8sData), &k8sState); err == nil {
+				k8sAvailable = (k8sState.User == "" && k8sState.Type == "")
+			}
+		}
+
+		// If host has data, check if it's truly available
+		if !hostAvailable {
+			var hostState types.GPUState
+			if err := json.Unmarshal([]byte(hostData), &hostState); err == nil {
+				hostAvailable = (hostState.User == "" && hostState.Type == "")
+			}
+		}
+
+		// GPU is available only if both K8s and host consider it available
+		if k8sAvailable && hostAvailable {
 			available = append(available, i)
 		}
 	}

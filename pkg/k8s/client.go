@@ -67,6 +67,10 @@ func getKubeConfig(kubeContext string) (*rest.Config, error) {
 }
 
 func (c *Client) CreateResourceClaim(ctx context.Context, req *ReservationRequest) (*resourceapi.ResourceClaim, error) {
+	return c.CreateResourceClaimWithPodSpec(ctx, req, nil)
+}
+
+func (c *Client) CreateResourceClaimWithPodSpec(ctx context.Context, req *ReservationRequest, podSpec *PodSpec) (*resourceapi.ResourceClaim, error) {
 	// Create ResourceClaimSpec for v1beta1 API
 	spec := resourceapi.ResourceClaimSpec{
 		Devices: resourceapi.DeviceClaim{
@@ -83,10 +87,21 @@ func (c *Client) CreateResourceClaim(ctx context.Context, req *ReservationReques
 
 	// TODO: Add support for specific GPU IDs and node preferences in Phase 2
 
+	annotations := make(map[string]string)
+	if podSpec != nil {
+		// Store Pod spec as JSON annotation for delayed Pod creation
+		podSpecJSON, err := json.Marshal(podSpec)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal Pod spec: %w", err)
+		}
+		annotations["k8shazgpu.com/pod-spec"] = string(podSpecJSON)
+	}
+
 	claim := &resourceapi.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      req.Name,
-			Namespace: c.namespace,
+			Name:        req.Name,
+			Namespace:   c.namespace,
+			Annotations: annotations,
 		},
 		Spec: spec,
 	}
@@ -329,6 +344,74 @@ func (c *Client) DeleteResourceClaim(ctx context.Context, claimName string) erro
 
 func (c *Client) DeletePod(ctx context.Context, podName string) error {
 	return c.clientset.CoreV1().Pods(c.namespace).Delete(ctx, podName, metav1.DeleteOptions{})
+}
+
+func (c *Client) CreatePodsForAllocatedClaims(ctx context.Context) error {
+	// Find allocated ResourceClaims that don't have associated Pods yet
+	claims, err := c.resourceClient.ResourceClaims(c.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list ResourceClaims: %w", err)
+	}
+
+	pods, err := c.clientset.CoreV1().Pods(c.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list Pods: %w", err)
+	}
+
+	// Create a map of ResourceClaim names that already have Pods
+	claimsWithPods := make(map[string]bool)
+	for _, pod := range pods.Items {
+		for _, claimRef := range pod.Spec.ResourceClaims {
+			if claimRef.ResourceClaimName != nil {
+				claimsWithPods[*claimRef.ResourceClaimName] = true
+			}
+		}
+	}
+
+	// Check each allocated claim
+	for _, claim := range claims.Items {
+		// Skip if claim is not allocated
+		if claim.Status.Allocation == nil {
+			continue
+		}
+
+		// Skip if claim already has a Pod
+		if claimsWithPods[claim.Name] {
+			continue
+		}
+
+		// Skip if claim doesn't have pod-spec annotation
+		podSpecJSON, exists := claim.Annotations["k8shazgpu.com/pod-spec"]
+		if !exists {
+			continue
+		}
+
+		// Parse Pod spec from annotation
+		var podSpec PodSpec
+		if err := json.Unmarshal([]byte(podSpecJSON), &podSpec); err != nil {
+			fmt.Printf("Warning: failed to parse pod spec for claim %s: %v\n", claim.Name, err)
+			continue
+		}
+
+		// Create Pod for this claim
+		fmt.Printf("Creating Pod for allocated claim %s...\n", claim.Name)
+		podReq := &PodRequest{
+			Name:      claim.Name + "-pod",
+			Image:     podSpec.Image,
+			Command:   podSpec.Command,
+			ClaimName: claim.Name,
+		}
+
+		_, err := c.CreatePod(ctx, podReq)
+		if err != nil {
+			fmt.Printf("Warning: failed to create Pod for claim %s: %v\n", claim.Name, err)
+			continue
+		}
+
+		fmt.Printf("✓ Created Pod %s for claim %s\n", podReq.Name, claim.Name)
+	}
+
+	return nil
 }
 
 func (c *Client) GetGPUSummary(ctx context.Context) (*GPUSummary, error) {

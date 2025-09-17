@@ -60,9 +60,15 @@ The Pod will have access to the reserved GPUs via CUDA_VISIBLE_DEVICES environme
 			PreferNode: preferNode,
 		}
 
+		// Store Pod spec for delayed creation
+		podSpec := &k8s.PodSpec{
+			Image:   image,
+			Command: args,
+		}
+
 		fmt.Printf("Creating ResourceClaim %s requesting %d GPU(s)...\n", claimName, gpus)
 
-		claim, err := client.CreateResourceClaim(ctx, req)
+		claim, err := client.CreateResourceClaimWithPodSpec(ctx, req, podSpec)
 		if err != nil {
 			return fmt.Errorf("failed to create ResourceClaim: %w", err)
 		}
@@ -75,8 +81,12 @@ The Pod will have access to the reserved GPUs via CUDA_VISIBLE_DEVICES environme
 			// Check GPU availability and provide helpful error message
 			if summary, summaryErr := client.GetGPUSummary(ctx); summaryErr == nil {
 				if summary.AvailableGPUs == 0 {
-					return fmt.Errorf("allocation failed: all %d GPUs in the cluster are currently in use\n\nCurrent GPU usage:\n%s\n\nTip: Use 'k8shazgpu status' to see detailed GPU allocation",
-						summary.TotalGPUs, formatGPUSummaryForError(summary))
+					fmt.Printf("⏳ No GPUs available - your request has been queued\n")
+					fmt.Printf("\nCurrent GPU usage:\n%s", formatGPUSummaryForError(summary))
+					fmt.Printf("💡 Monitor progress with: k8shazgpu status --name %s\n", claimName)
+					fmt.Printf("🚀 Create Pod when allocated: k8shazgpu reconcile\n")
+					fmt.Printf("🧹 Cancel request with: kubectl delete resourceclaim %s\n", claimName)
+					return nil // Don't return error - this is expected behavior
 				}
 			}
 			return fmt.Errorf("failed waiting for allocation: %w", err)

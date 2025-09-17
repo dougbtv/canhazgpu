@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -90,6 +91,27 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Start automatic reconciliation goroutine
+	go func() {
+		reconcileLog := ctrl.Log.WithName("auto-reconciler")
+		reconcileLog.Info("starting automatic Pod reconciliation")
+
+		ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				reconcileLog.Info("stopping automatic reconciliation")
+				return
+			case <-ticker.C:
+				if err := controller.AutoReconcilePods(ctx); err != nil {
+					reconcileLog.Error(err, "failed to auto-reconcile Pods")
+				}
+			}
+		}
+	}()
 
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")

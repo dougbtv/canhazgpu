@@ -50,6 +50,7 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(cleanupCmd)
+	rootCmd.AddCommand(reconcileCmd)
 }
 
 func initConfig() {
