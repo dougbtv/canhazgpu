@@ -1,3 +1,5 @@
+K8s haz gpu? Yup.
+
 # Build all components
 make build-all
 
