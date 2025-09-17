@@ -54,6 +54,9 @@ rules:
 - apiGroups: ["canhazgpu.dev"]
   resources: ["nodecachestatuses"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["canhazgpu.dev"]
+  resources: ["nodecachestatuses/status"]
+  verbs: ["get", "update", "patch"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

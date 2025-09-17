@@ -3,6 +3,7 @@ package k8scli
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -47,12 +48,43 @@ var cachePlanShowCmd = &cobra.Command{
 		}
 
 		// Pretty print the plan
-		data, err := plan.MarshalJSON()
-		if err != nil {
-			return fmt.Errorf("failed to marshal plan: %w", err)
+		fmt.Printf("Cache Plan: %s\n", plan.GetName())
+		fmt.Printf("Created: %s\n", plan.GetCreationTimestamp().Format("2006-01-02 15:04:05"))
+
+		spec, found, err := unstructured.NestedMap(plan.Object, "spec")
+		if err != nil || !found {
+			fmt.Println("No cache items defined")
+			return nil
 		}
 
-		fmt.Println(string(data))
+		items, found, err := unstructured.NestedSlice(spec, "items")
+		if err != nil || !found {
+			fmt.Println("No cache items defined")
+			return nil
+		}
+
+		fmt.Printf("\nCache Items (%d):\n", len(items))
+		fmt.Println("TYPE      NAME                                              REF/URL")
+		fmt.Println("--------  ------------------------------------------------  --------------------------------------------------")
+
+		for _, item := range items {
+			itemMap := item.(map[string]interface{})
+			itemType := getStringFromMap(itemMap, "type")
+			name := getStringFromMap(itemMap, "name")
+
+			var ref string
+			if itemType == "image" {
+				if img, ok := itemMap["image"].(map[string]interface{}); ok {
+					ref = getStringFromMap(img, "ref")
+				}
+			} else if itemType == "gitRepo" {
+				if repo, ok := itemMap["gitRepo"].(map[string]interface{}); ok {
+					ref = getStringFromMap(repo, "url")
+				}
+			}
+
+			fmt.Printf("%-8s  %-48s  %-50s\n", itemType, truncateString(name, 48), truncateString(ref, 50))
+		}
 		return nil
 	},
 }
@@ -79,8 +111,13 @@ var cacheListCmd = &cobra.Command{
 			return fmt.Errorf("failed to list node cache statuses: %w", err)
 		}
 
-		fmt.Printf("%-20s %-10s %-10s %-30s\n", "NODE", "IMAGES", "GIT_REPOS", "LAST_UPDATE")
-		fmt.Println("--------------------------------------------------------------------")
+		if len(list.Items) == 0 {
+			fmt.Println("No nodes with cache status found")
+			return nil
+		}
+
+		fmt.Printf("%-20s %-8s %-8s %-6s %-20s\n", "NODE", "IMAGES", "REPOS", "ERRORS", "LAST_UPDATE")
+		fmt.Println("--------------------------------------------------------------------------------")
 
 		for _, item := range list.Items {
 			nodeName := getStringFromUnstructured(&item, "status", "nodeName")
@@ -90,13 +127,23 @@ var cacheListCmd = &cobra.Command{
 
 			images := getArrayFromUnstructured(&item, "status", "images")
 			gitRepos := getArrayFromUnstructured(&item, "status", "gitRepos")
+			errors := getArrayFromUnstructured(&item, "status", "errors")
 			lastUpdate := getStringFromUnstructured(&item, "status", "lastUpdate")
 
-			fmt.Printf("%-20s %-10d %-10d %-30s\n",
-				nodeName,
+			// Format last update time
+			lastUpdateFormatted := "never"
+			if lastUpdate != "" {
+				if t, err := time.Parse(time.RFC3339, lastUpdate); err == nil {
+					lastUpdateFormatted = t.Format("15:04:05")
+				}
+			}
+
+			fmt.Printf("%-20s %-8d %-8d %-6d %-20s\n",
+				truncateString(nodeName, 20),
 				len(images),
 				len(gitRepos),
-				lastUpdate)
+				len(errors),
+				lastUpdateFormatted)
 		}
 
 		return nil
@@ -262,4 +309,18 @@ func getArrayFromUnstructured(obj *unstructured.Unstructured, fields ...string) 
 		return []interface{}{}
 	}
 	return val
+}
+
+func getStringFromMap(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
