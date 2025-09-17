@@ -415,9 +415,52 @@ func (c *Client) CreatePodsForAllocatedClaims(ctx context.Context) error {
 }
 
 func (c *Client) GetGPUSummary(ctx context.Context) (*GPUSummary, error) {
-	// For now, calculate GPU summary from ResourceClaims instead of querying node agents
-	// This is more reliable when running outside the cluster
+	// Try to get real-time status from node agents first
+	summary, err := c.getGPUSummaryFromNodeAgents(ctx)
+	if err == nil {
+		return summary, nil
+	}
+
+	// Fallback to ResourceClaims-only calculation if node agents are unreachable
 	return c.getGPUSummaryFromClaims(ctx)
+}
+
+func (c *Client) getGPUSummaryFromNodeAgents(ctx context.Context) (*GPUSummary, error) {
+	// Get nodes to query their agents
+	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	summary := &GPUSummary{}
+
+	for _, node := range nodes.Items {
+		// Check if node is ready
+		ready := false
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+				ready = true
+				break
+			}
+		}
+
+		if !ready {
+			continue
+		}
+
+		// Query node agent for real-time GPU status
+		nodeInfo, err := c.getNodeGPUInfo(ctx, node.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get GPU info from node %s: %w", node.Name, err)
+		}
+
+		summary.Nodes = append(summary.Nodes, *nodeInfo)
+		summary.TotalGPUs += nodeInfo.TotalGPUs
+		summary.AvailableGPUs += len(nodeInfo.AvailableGPUs)
+		summary.AllocatedGPUs += len(nodeInfo.AllocatedGPUs)
+	}
+
+	return summary, nil
 }
 
 func (c *Client) getGPUSummaryFromClaims(ctx context.Context) (*GPUSummary, error) {

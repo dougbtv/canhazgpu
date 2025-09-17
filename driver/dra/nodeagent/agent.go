@@ -53,14 +53,22 @@ func (na *NodeAgent) handleStatus(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if state.User != "" && state.Type == "k8s" {
-			// Extract claim UID from user field (format: "k8s:claimUID")
-			claimUID := state.User[4:] // Remove "k8s:" prefix
-			allocatedGPUs = append(allocatedGPUs, api.GPUInfo{
-				ID:       i,
-				ClaimUID: claimUID,
+		if state.User != "" {
+			gpuInfo := api.GPUInfo{
+				ID: i,
+			}
+
+			if state.Type == "k8s" {
+				// Extract claim UID from user field (format: "k8s:claimUID")
+				claimUID := state.User[4:] // Remove "k8s:" prefix
+				gpuInfo.ClaimUID = claimUID
 				// TODO: Get pod name and namespace from Redis if stored
-			})
+			} else {
+				// Manual or other reservation - show as allocated but without k8s details
+				gpuInfo.ClaimUID = fmt.Sprintf("manual:%s", state.User)
+			}
+
+			allocatedGPUs = append(allocatedGPUs, gpuInfo)
 		}
 	}
 

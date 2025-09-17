@@ -128,16 +128,19 @@ build-k8s: deps
 build-controller:
 	@echo "Building DRA controller"
 	@$(MAKE) -C driver/dra/controller build
+	@$(MAKE) -C driver/dra/controller push
 
 .PHONY: build-nodeagent
 build-nodeagent:
 	@echo "Building node agent"
 	@$(MAKE) -C driver/dra/nodeagent build
+	@$(MAKE) -C driver/dra/nodeagent push
 
 .PHONY: build-kubeletplugin
 build-kubeletplugin:
 	@echo "Building kubelet plugin"
 	@$(MAKE) -C driver/dra/kubeletplugin build
+	@$(MAKE) -C driver/dra/nodeagent push
 
 .PHONY: build-all
 build-all: build build-k8s build-controller build-nodeagent build-kubeletplugin

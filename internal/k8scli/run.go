@@ -75,20 +75,10 @@ The Pod will have access to the reserved GPUs via CUDA_VISIBLE_DEVICES environme
 
 		fmt.Printf("Waiting for allocation of claim %s...\n", claim.Name)
 
-		// Use shorter timeout for allocation to avoid hanging indefinitely
-		allocated, err := client.WaitForAllocationWithTimeout(ctx, claim.Name, 5*time.Second)
+		// Wait for allocation with periodic status updates
+		runCtx := &runCommandContext{}
+		allocated, err := runCtx.waitForAllocationWithStatusUpdates(ctx, client, claim.Name, claimName)
 		if err != nil {
-			// Check GPU availability and provide helpful error message
-			if summary, summaryErr := client.GetGPUSummary(ctx); summaryErr == nil {
-				if summary.AvailableGPUs == 0 {
-					fmt.Printf("⏳ No GPUs available - your request has been queued\n")
-					fmt.Printf("\nCurrent GPU usage:\n%s", formatGPUSummaryForError(summary))
-					fmt.Printf("💡 Monitor progress with: k8shazgpu status --name %s\n", claimName)
-					fmt.Printf("🚀 Create Pod when allocated: k8shazgpu reconcile\n")
-					fmt.Printf("🧹 Cancel request with: kubectl delete resourceclaim %s\n", claimName)
-					return nil // Don't return error - this is expected behavior
-				}
-			}
 			return fmt.Errorf("failed waiting for allocation: %w", err)
 		}
 
@@ -166,3 +156,92 @@ func formatGPUSummaryForError(summary *k8s.GPUSummary) string {
 	}
 	return result.String()
 }
+
+func (c *runCommandContext) waitForAllocationWithStatusUpdates(ctx context.Context, client *k8s.Client, claimName, displayName string) (*k8s.AllocationResult, error) {
+	statusShown := false
+	statusInterval := 5 * time.Second
+	ticker := time.NewTicker(statusInterval)
+	defer ticker.Stop()
+
+	// Try immediate allocation first
+	allocated, err := client.WaitForAllocationWithTimeout(ctx, claimName, 2*time.Second)
+	if err == nil {
+		return allocated, nil
+	}
+
+	// Show initial status if allocation is pending
+	summary, summaryErr := client.GetGPUSummary(ctx)
+	if summaryErr == nil && summary.AvailableGPUs == 0 {
+		fmt.Printf("⏳ No GPUs currently available - your request is queued\n")
+		fmt.Printf("\nCurrent GPU status:\n%s", formatGPUStatus(summary))
+		statusShown = true
+	}
+
+	startTime := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			if statusShown {
+				fmt.Printf("\n🧹 To cancel this request: kubectl delete resourceclaim %s\n", claimName)
+				fmt.Printf("💡 To monitor later: k8shazgpu status --name %s\n", displayName)
+			}
+			return nil, ctx.Err()
+		case <-ticker.C:
+			// Check allocation status
+			allocated, err := client.WaitForAllocationWithTimeout(ctx, claimName, 500*time.Millisecond)
+			if err == nil {
+				if statusShown {
+					fmt.Printf("✓ GPU allocation successful after %v\n", time.Since(startTime).Round(time.Second))
+				}
+				return allocated, nil
+			}
+
+			// Show periodic status update
+			if summary, summaryErr := client.GetGPUSummary(ctx); summaryErr == nil {
+				elapsed := time.Since(startTime).Round(time.Second)
+				if summary.AvailableGPUs == 0 {
+					fmt.Printf("⏳ Still waiting for GPU allocation (%v elapsed)\n", elapsed)
+					if !statusShown {
+						fmt.Printf("\nCurrent GPU status:\n%s", formatGPUStatus(summary))
+						statusShown = true
+					}
+				} else {
+					fmt.Printf("🔄 %d GPUs became available (%v elapsed), checking allocation...\n", summary.AvailableGPUs, elapsed)
+				}
+			}
+		}
+	}
+}
+
+func formatGPUStatus(summary *k8s.GPUSummary) string {
+	var result strings.Builder
+	for _, node := range summary.Nodes {
+		result.WriteString(fmt.Sprintf("  Node %s: %d total GPUs\n", node.NodeName, node.TotalGPUs))
+		if len(node.AllocatedGPUs) > 0 {
+			result.WriteString("    Allocated GPUs:\n")
+			for _, gpu := range node.AllocatedGPUs {
+				if gpu.PodName != "" {
+					result.WriteString(fmt.Sprintf("      GPU%d → Pod: %s\n", gpu.ID, gpu.PodName))
+				} else if gpu.ClaimUID != "" {
+					result.WriteString(fmt.Sprintf("      GPU%d → Claim: %s\n", gpu.ID, gpu.ClaimUID[:8]+"..."))
+				} else {
+					result.WriteString(fmt.Sprintf("      GPU%d → Reserved\n", gpu.ID))
+				}
+			}
+		}
+		if summary.AvailableGPUs > 0 {
+			result.WriteString(fmt.Sprintf("    Available: %d GPUs\n", summary.AvailableGPUs))
+		} else {
+			result.WriteString("    Available: None\n")
+		}
+	}
+
+	// Show helpful commands
+	result.WriteString("\n💡 Helpful commands while waiting:\n")
+	result.WriteString("   k8shazgpu status     - View current GPU allocation status\n")
+	result.WriteString("   kubectl get pods     - See running pods\n")
+
+	return result.String()
+}
+
+type runCommandContext struct {}
