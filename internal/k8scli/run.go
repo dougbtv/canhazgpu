@@ -82,6 +82,11 @@ The Pod will have access to the reserved GPUs via CUDA_VISIBLE_DEVICES environme
 			return fmt.Errorf("failed waiting for allocation: %w", err)
 		}
 
+		// If allocated is nil, it means the request was queued and we're exiting early
+		if allocated == nil {
+			return nil
+		}
+
 		fmt.Printf("✓ Allocated %d GPU(s), creating Pod...\n", len(allocated.AllocatedGPUs))
 
 		podReq := &k8s.PodRequest{
@@ -160,6 +165,7 @@ func formatGPUSummaryForError(summary *k8s.GPUSummary) string {
 func (c *runCommandContext) waitForAllocationWithStatusUpdates(ctx context.Context, client *k8s.Client, claimName, displayName string) (*k8s.AllocationResult, error) {
 	statusShown := false
 	statusInterval := 5 * time.Second
+	maxWaitTime := 5 * time.Second // Only wait 5 seconds total
 	ticker := time.NewTicker(statusInterval)
 	defer ticker.Stop()
 
@@ -175,6 +181,23 @@ func (c *runCommandContext) waitForAllocationWithStatusUpdates(ctx context.Conte
 		fmt.Printf("⏳ No GPUs currently available - your request is queued\n")
 		fmt.Printf("\nCurrent GPU status:\n%s", formatGPUStatus(summary))
 		statusShown = true
+
+		// Wait briefly and then exit with helpful message
+		fmt.Printf("⏳ Waiting %v for immediate allocation...\n", maxWaitTime)
+		time.Sleep(maxWaitTime)
+
+		// Check once more
+		allocated, err := client.WaitForAllocationWithTimeout(ctx, claimName, 500*time.Millisecond)
+		if err == nil {
+			fmt.Printf("✓ GPU allocation successful!\n")
+			return allocated, nil
+		}
+
+		// Still no allocation - provide helpful exit message
+		fmt.Printf("\n💤 Your request is queued and waiting for GPU availability\n")
+		fmt.Printf("🔍 Monitor status: k8shazgpu status\n")
+		fmt.Printf("🧹 Cancel request: k8shazgpu cleanup --name %s\n", displayName)
+		return nil, nil // Not an error - this is expected behavior
 	}
 
 	startTime := time.Now()
