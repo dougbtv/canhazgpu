@@ -28,6 +28,9 @@ spec:
                       type: string
                     present:
                       type: boolean
+                    status:
+                      type: string
+                      enum: ["pulling", "ready", "failed"]
                     digest:
                       type: string
                     lastChecked:

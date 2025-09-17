@@ -150,6 +150,94 @@ var cacheListCmd = &cobra.Command{
 	},
 }
 
+var cacheStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show detailed cache status with individual image information",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := context.Background()
+
+		client, err := getDynamicClient()
+		if err != nil {
+			return fmt.Errorf("failed to create client: %w", err)
+		}
+
+		gvr := schema.GroupVersionResource{
+			Group:    "canhazgpu.dev",
+			Version:  "v1alpha1",
+			Resource: "nodecachestatuses",
+		}
+
+		list, err := client.Resource(gvr).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to list node cache statuses: %w", err)
+		}
+
+		if len(list.Items) == 0 {
+			fmt.Println("No nodes with cache status found")
+			return nil
+		}
+
+		for _, item := range list.Items {
+			nodeName := getStringFromUnstructured(&item, "status", "nodeName")
+			if nodeName == "" {
+				nodeName = item.GetName()
+			}
+
+			images := getArrayFromUnstructured(&item, "status", "images")
+			lastUpdate := getStringFromUnstructured(&item, "status", "lastUpdate")
+
+			fmt.Printf("\n=== Node: %s ===\n", nodeName)
+			fmt.Printf("Last Update: %s\n", lastUpdate)
+			fmt.Printf("Images (%d):\n", len(images))
+
+			if len(images) == 0 {
+				fmt.Println("  No images")
+			} else {
+				fmt.Printf("%-8s %-50s %-10s %s\n", "STATUS", "IMAGE", "PRESENT", "MESSAGE")
+				fmt.Println("-------------------------------------------------------------------------------------")
+
+				for _, img := range images {
+					imgMap, ok := img.(map[string]interface{})
+					if !ok {
+						continue
+					}
+
+					ref := getStringFromMap(imgMap, "ref")
+					status := getStringFromMap(imgMap, "status")
+					present := getBoolFromMap(imgMap, "present")
+					message := getStringFromMap(imgMap, "message")
+
+					presentStr := "No"
+					if present {
+						presentStr = "Yes"
+					}
+
+					// Add status icon
+					statusIcon := ""
+					switch status {
+					case "pulling":
+						statusIcon = "🔄"
+					case "ready":
+						statusIcon = "✅"
+					case "failed":
+						statusIcon = "❌"
+					default:
+						statusIcon = "❓"
+					}
+
+					fmt.Printf("%-8s %-50s %-10s %s\n",
+						statusIcon+" "+status,
+						truncateString(ref, 48),
+						presentStr,
+						truncateString(message, 40))
+				}
+			}
+		}
+
+		return nil
+	},
+}
+
 var cacheAddImageCmd = &cobra.Command{
 	Use:   "image <ref>",
 	Short: "Add image to cache plan",
@@ -171,11 +259,35 @@ var cacheAddCmd = &cobra.Command{
 	Short: "Add resources to cache plan",
 }
 
+var cacheRemoveCmd = &cobra.Command{
+	Use:   "remove",
+	Short: "Remove resources from cache plan",
+}
+
+var cacheRemoveImageCmd = &cobra.Command{
+	Use:   "image <ref>",
+	Short: "Remove image from cache plan",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		imageRef := args[0]
+		name, _ := cmd.Flags().GetString("name")
+
+		if name == "" {
+			// Generate name from image ref
+			name = generateImageName(imageRef)
+		}
+
+		return removeImageFromCachePlan(imageRef, name)
+	},
+}
+
 func init() {
 	// Cache command structure
 	cacheCmd.AddCommand(cachePlanCmd)
 	cacheCmd.AddCommand(cacheListCmd)
+	cacheCmd.AddCommand(cacheStatusCmd)
 	cacheCmd.AddCommand(cacheAddCmd)
+	cacheCmd.AddCommand(cacheRemoveCmd)
 
 	// Plan subcommands
 	cachePlanCmd.AddCommand(cachePlanShowCmd)
@@ -183,8 +295,12 @@ func init() {
 	// Add subcommands
 	cacheAddCmd.AddCommand(cacheAddImageCmd)
 
+	// Remove subcommands
+	cacheRemoveCmd.AddCommand(cacheRemoveImageCmd)
+
 	// Flags
 	cacheAddImageCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
+	cacheRemoveImageCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
 
 	rootCmd.AddCommand(cacheCmd)
 }
@@ -294,6 +410,85 @@ func addImageToCachePlan(imageRef, name string) error {
 	return nil
 }
 
+func removeImageFromCachePlan(imageRef, name string) error {
+	ctx := context.Background()
+
+	client, err := getDynamicClient()
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+
+	gvr := schema.GroupVersionResource{
+		Group:    "canhazgpu.dev",
+		Version:  "v1alpha1",
+		Resource: "cacheplans",
+	}
+
+	// Try to get existing plan
+	plan, err := client.Resource(gvr).Get(ctx, "default", metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("cache plan not found: %w", err)
+	}
+
+	// Get items
+	spec, found, err := unstructured.NestedMap(plan.Object, "spec")
+	if err != nil || !found {
+		return fmt.Errorf("cache plan has no spec")
+	}
+
+	items, found, err := unstructured.NestedSlice(spec, "items")
+	if err != nil || !found {
+		return fmt.Errorf("cache plan has no items")
+	}
+
+	// Find and remove the item
+	var newItems []interface{}
+	removed := false
+
+	for _, item := range items {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Check if this is the item to remove (by name or by image ref)
+		itemName, _ := itemMap["name"].(string)
+		itemType, _ := itemMap["type"].(string)
+
+		if itemType == "image" {
+			if imageData, ok := itemMap["image"].(map[string]interface{}); ok {
+				if itemRef, ok := imageData["ref"].(string); ok {
+					// Remove if name matches or if ref matches
+					if itemName == name || itemRef == imageRef {
+						fmt.Printf("✓ Removing image %s from cache plan\n", itemRef)
+						removed = true
+						continue
+					}
+				}
+			}
+		}
+
+		// Keep this item
+		newItems = append(newItems, item)
+	}
+
+	if !removed {
+		return fmt.Errorf("image %s not found in cache plan", imageRef)
+	}
+
+	// Update the plan
+	spec["items"] = newItems
+	plan.Object["spec"] = spec
+
+	_, err = client.Resource(gvr).Update(ctx, plan, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update cache plan: %w", err)
+	}
+
+	fmt.Printf("✓ Updated cache plan\n")
+	return nil
+}
+
 // Helper functions for extracting data from unstructured objects
 func getStringFromUnstructured(obj *unstructured.Unstructured, fields ...string) string {
 	val, found, err := unstructured.NestedString(obj.Object, fields...)
@@ -303,19 +498,26 @@ func getStringFromUnstructured(obj *unstructured.Unstructured, fields ...string)
 	return val
 }
 
+func getStringFromMap(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
+}
+
+func getBoolFromMap(m map[string]interface{}, key string) bool {
+	if val, ok := m[key].(bool); ok {
+		return val
+	}
+	return false
+}
+
 func getArrayFromUnstructured(obj *unstructured.Unstructured, fields ...string) []interface{} {
 	val, found, err := unstructured.NestedSlice(obj.Object, fields...)
 	if err != nil || !found {
 		return []interface{}{}
 	}
 	return val
-}
-
-func getStringFromMap(m map[string]interface{}, key string) string {
-	if val, ok := m[key].(string); ok {
-		return val
-	}
-	return ""
 }
 
 func truncateString(s string, maxLen int) string {

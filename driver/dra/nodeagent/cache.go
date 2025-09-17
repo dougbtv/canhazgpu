@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,15 +17,19 @@ import (
 
 // SimpleCacheReconciler is a minimal cache reconciler for testing
 type SimpleCacheReconciler struct {
-	client   dynamic.Interface
-	nodeName string
+	client             dynamic.Interface
+	nodeName           string
+	lastFullReconcile  time.Time
+	lastCachePlanHash  string
+	currentImageStatus map[string]map[string]interface{} // imageRef -> status map
 }
 
 // NewSimpleCacheReconciler creates a simple cache reconciler
 func NewSimpleCacheReconciler(client dynamic.Interface, nodeName string) *SimpleCacheReconciler {
 	return &SimpleCacheReconciler{
-		client:   client,
-		nodeName: nodeName,
+		client:             client,
+		nodeName:           nodeName,
+		currentImageStatus: make(map[string]map[string]interface{}),
 	}
 }
 
@@ -58,6 +63,30 @@ func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[st
 		return pulledImages, errors
 	}
 
+	// Calculate cache plan hash to detect changes
+	planHash := r.calculatePlanHash(cachePlans)
+	planChanged := planHash != r.lastCachePlanHash
+
+	// Check if we should do a full reconciliation (hourly or if plan changed)
+	now := time.Now()
+	timeSinceLastFull := now.Sub(r.lastFullReconcile)
+	shouldFullReconcile := planChanged || timeSinceLastFull >= time.Hour
+
+	if planChanged {
+		klog.Infof("Cache plan changed, triggering immediate reconciliation")
+		r.lastCachePlanHash = planHash
+	} else if shouldFullReconcile {
+		klog.Infof("Performing hourly reconciliation (last: %v ago)", timeSinceLastFull)
+	} else {
+		klog.V(4).Infof("Skipping reconciliation - last full reconcile was %v ago (< 1 hour) and no plan changes", timeSinceLastFull)
+		// Return current status without pulling
+		return r.getCurrentImageStatus(), errors
+	}
+
+	if shouldFullReconcile {
+		r.lastFullReconcile = now
+	}
+
 	// Process each cache plan
 	for _, plan := range cachePlans {
 		items, ok := plan.Object["spec"].(map[string]interface{})["items"].([]interface{})
@@ -87,21 +116,46 @@ func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[st
 				continue
 			}
 
+			// Check if image is already successfully cached
+			currentStatus, exists := r.currentImageStatus[imageRef]
+			if exists && currentStatus["status"] == "ready" && !planChanged {
+				klog.V(4).Infof("Image %s already ready, skipping pull", imageRef)
+				pulledImages = append(pulledImages, currentStatus)
+				continue
+			}
+
+			// First, add the image as "pulling" status
+			pullingImage := map[string]interface{}{
+				"ref":         imageRef,
+				"present":     false,
+				"status":      "pulling",
+				"digest":      "",
+				"lastChecked": time.Now().Format(time.RFC3339),
+				"message":     "Pulling image...",
+			}
+
 			// Pull the image
 			klog.Infof("Pulling image: %s", imageRef)
 			if err := r.pullImage(imageRef); err != nil {
 				klog.Errorf("Failed to pull image %s: %v", imageRef, err)
 				errors = append(errors, fmt.Sprintf("Failed to pull image %s: %v", imageRef, err))
+				// Update status to failed
+				pullingImage["status"] = "failed"
+				pullingImage["present"] = false
+				pullingImage["message"] = fmt.Sprintf("Pull failed: %v", err)
+				pullingImage["lastChecked"] = time.Now().Format(time.RFC3339)
 			} else {
 				klog.Infof("Successfully pulled image: %s", imageRef)
-				pulledImages = append(pulledImages, map[string]interface{}{
-					"ref":         imageRef,
-					"present":     true,
-					"digest":      "", // TODO: get actual digest from crictl
-					"lastChecked": time.Now().Format(time.RFC3339),
-					"message":     "Successfully pulled",
-				})
+				// Update status to ready
+				pullingImage["status"] = "ready"
+				pullingImage["present"] = true
+				pullingImage["message"] = "Successfully pulled"
+				pullingImage["lastChecked"] = time.Now().Format(time.RFC3339)
 			}
+
+			// Update our cache
+			r.currentImageStatus[imageRef] = pullingImage
+			pulledImages = append(pulledImages, pullingImage)
 		}
 	}
 
@@ -122,6 +176,25 @@ func (r *SimpleCacheReconciler) getCachePlans(ctx context.Context) ([]unstructur
 	}
 
 	return list.Items, nil
+}
+
+// calculatePlanHash creates a hash of the cache plans for change detection
+func (r *SimpleCacheReconciler) calculatePlanHash(plans []unstructured.Unstructured) string {
+	var planData strings.Builder
+	for _, plan := range plans {
+		planData.WriteString(plan.GetResourceVersion())
+		planData.WriteString(fmt.Sprintf("%v", plan.Object["spec"]))
+	}
+	return fmt.Sprintf("%x", planData.String())
+}
+
+// getCurrentImageStatus returns the current cached image status
+func (r *SimpleCacheReconciler) getCurrentImageStatus() []map[string]interface{} {
+	var images []map[string]interface{}
+	for _, status := range r.currentImageStatus {
+		images = append(images, status)
+	}
+	return images
 }
 
 // pullImage pulls an image using crictl
