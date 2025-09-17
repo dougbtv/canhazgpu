@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
 	"github.com/russellb/canhazgpu/pkg/cdi"
@@ -93,6 +95,40 @@ func main() {
 
 	// Start heartbeat routine
 	go agent.startHeartbeat(ctx)
+
+	// Initialize Kubernetes client for cache reconciliation
+	k8sConfig, err := rest.InClusterConfig()
+	if err != nil {
+		klog.Errorf("Failed to get in-cluster config: %v", err)
+	} else {
+		dynamicClient, err := dynamic.NewForConfig(k8sConfig)
+		if err != nil {
+			klog.Errorf("Failed to create dynamic client: %v", err)
+		} else {
+			// Start cache reconciliation
+			cacheReconciler := NewSimpleCacheReconciler(dynamicClient, *nodeName)
+			go func() {
+				ticker := time.NewTicker(60 * time.Second) // Reconcile every 60 seconds
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if err := cacheReconciler.Reconcile(ctx); err != nil {
+							klog.Errorf("Cache reconciliation failed: %v", err)
+						}
+					}
+				}
+			}()
+
+			// Run initial reconciliation
+			if err := cacheReconciler.Reconcile(ctx); err != nil {
+				klog.Errorf("Initial cache reconciliation failed: %v", err)
+			}
+		}
+	}
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)

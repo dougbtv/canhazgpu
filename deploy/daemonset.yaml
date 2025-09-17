@@ -56,6 +56,20 @@ spec:
         - name: redis-sock
           mountPath: /host/run/redis/redis.sock
           readOnly: true
+        # Cache directory
+        - name: cache-root
+          mountPath: /var/lib/canhazgpu-cache
+        # CRI-O socket for image operations
+        - name: crio-sock
+          mountPath: /host/run/crio
+          readOnly: true
+        # TODO: Add containerd support when needed
+        # - name: containerd-sock
+        #   mountPath: /host/run/containerd/containerd.sock
+        #   readOnly: true
+        # - name: containerd-config
+        #   mountPath: /host/etc/containerd
+        #   readOnly: true
         resources:
           limits:
             cpu: 200m
@@ -72,6 +86,25 @@ spec:
         hostPath:
           path: /run/redis/redis.sock
           type: Socket
+      # Cache directory
+      - name: cache-root
+        hostPath:
+          path: /var/lib/canhazgpu-cache
+          type: DirectoryOrCreate
+      # CRI-O socket for image operations
+      - name: crio-sock
+        hostPath:
+          path: /var/run/crio
+          type: DirectoryOrCreate
+      # TODO: Add containerd volumes when needed
+      # - name: containerd-sock
+      #   hostPath:
+      #     path: /run/containerd/containerd.sock
+      #     type: Socket
+      # - name: containerd-config
+      #   hostPath:
+      #     path: /etc/containerd
+      #     type: DirectoryOrCreate
       tolerations:
       # Allow running on control-plane nodes for single-node dev clusters
       - key: node-role.kubernetes.io/control-plane

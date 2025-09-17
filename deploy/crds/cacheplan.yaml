@@ -1,0 +1,96 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: cacheplans.canhazgpu.dev
+spec:
+  group: canhazgpu.dev
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              items:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                      enum: ["image", "gitRepo", "pythonWheels", "hfModel"]
+                    name:
+                      type: string
+                    scope:
+                      type: string
+                      enum: ["allNodes", "nodeSelector"]
+                      default: "allNodes"
+                    image:
+                      type: object
+                      properties:
+                        ref:
+                          type: string
+                      required: ["ref"]
+                    gitRepo:
+                      type: object
+                      properties:
+                        url:
+                          type: string
+                        branch:
+                          type: string
+                        commit:
+                          type: string
+                        pathName:
+                          type: string
+                        syncStrategy:
+                          type: string
+                          enum: ["hardReset", "merge"]
+                          default: "hardReset"
+                      required: ["url", "pathName"]
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                  required: ["type", "name"]
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum: ["Applied", "Degraded", "Progressing"]
+              summary:
+                type: object
+                properties:
+                  totalItems:
+                    type: integer
+                  readyItems:
+                    type: integer
+                  failedItems:
+                    type: integer
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+    subresources:
+      status: {}
+  scope: Cluster
+  names:
+    plural: cacheplans
+    singular: cacheplan
+    kind: CachePlan
