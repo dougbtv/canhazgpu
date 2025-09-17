@@ -1,8 +1,8 @@
 FROM registry.k8s.io/build-image/debian-base:bookworm-v1.0.3
 
-# Install crictl for CRI operations
+# Install crictl for CRI operations and git for repository cloning
 RUN apt-get update && \
-    apt-get install -y curl && \
+    apt-get install -y curl git && \
     CRICTL_VERSION="v1.28.0" && \
     curl -L "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-amd64.tar.gz" | tar -C /usr/local/bin -xz && \
     apt-get clean && \

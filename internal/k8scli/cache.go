@@ -3,6 +3,7 @@ package k8scli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -184,6 +185,7 @@ var cacheStatusCmd = &cobra.Command{
 			}
 
 			images := getArrayFromUnstructured(&item, "status", "images")
+			gitRepos := getArrayFromUnstructured(&item, "status", "gitRepos")
 			lastUpdate := getStringFromUnstructured(&item, "status", "lastUpdate")
 
 			fmt.Printf("\n=== Node: %s ===\n", nodeName)
@@ -232,6 +234,58 @@ var cacheStatusCmd = &cobra.Command{
 						truncateString(message, 40))
 				}
 			}
+
+			// Git Repositories section
+			fmt.Printf("\nGit Repositories (%d):\n", len(gitRepos))
+
+			if len(gitRepos) == 0 {
+				fmt.Println("  No git repositories")
+			} else {
+				fmt.Printf("%-8s %-40s %-10s %-10s %s\n", "STATUS", "REPOSITORY", "BRANCH", "PRESENT", "MESSAGE")
+				fmt.Println("-------------------------------------------------------------------------------------")
+
+				for _, repo := range gitRepos {
+					repoMap, ok := repo.(map[string]interface{})
+					if !ok {
+						continue
+					}
+
+					ref := getStringFromMap(repoMap, "ref")
+					status := getStringFromMap(repoMap, "status")
+					branch := getStringFromMap(repoMap, "branch")
+					present := getBoolFromMap(repoMap, "present")
+					message := getStringFromMap(repoMap, "message")
+
+					presentStr := "No"
+					if present {
+						presentStr = "Yes"
+					}
+
+					// Add status icon
+					statusIcon := ""
+					switch status {
+					case "pulling":
+						statusIcon = "🔄"
+					case "ready":
+						statusIcon = "✅"
+					case "failed":
+						statusIcon = "❌"
+					default:
+						statusIcon = "❓"
+					}
+
+					if branch == "" {
+						branch = "main"
+					}
+
+					fmt.Printf("%-8s %-40s %-10s %-10s %s\n",
+						statusIcon+" "+status,
+						truncateString(ref, 38),
+						truncateString(branch, 8),
+						presentStr,
+						truncateString(message, 30))
+				}
+			}
 		}
 
 		return nil
@@ -251,6 +305,28 @@ var cacheAddImageCmd = &cobra.Command{
 		}
 
 		return addImageToCachePlan(imageRef, name)
+	},
+}
+
+var cacheAddGitRepoCmd = &cobra.Command{
+	Use:   "gitrepo <url>",
+	Short: "Add git repository to cache plan",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		gitURL := args[0]
+		name, _ := cmd.Flags().GetString("name")
+		branch, _ := cmd.Flags().GetString("branch")
+
+		if name == "" {
+			// Generate name from git URL
+			name = generateGitRepoName(gitURL)
+		}
+
+		if branch == "" {
+			branch = "main" // default branch
+		}
+
+		return addGitRepoToCachePlan(gitURL, branch, name)
 	},
 }
 
@@ -294,12 +370,15 @@ func init() {
 
 	// Add subcommands
 	cacheAddCmd.AddCommand(cacheAddImageCmd)
+	cacheAddCmd.AddCommand(cacheAddGitRepoCmd)
 
 	// Remove subcommands
 	cacheRemoveCmd.AddCommand(cacheRemoveImageCmd)
 
 	// Flags
 	cacheAddImageCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
+	cacheAddGitRepoCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
+	cacheAddGitRepoCmd.Flags().String("branch", "", "Git branch to clone (default: main)")
 	cacheRemoveImageCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
 
 	rootCmd.AddCommand(cacheCmd)
@@ -525,4 +604,93 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func generateGitRepoName(gitURL string) string {
+	// Extract repo name from URL
+	// e.g., https://github.com/vllm-project/vllm.git -> vllm-project-vllm
+	gitURL = strings.TrimSuffix(gitURL, ".git")
+	parts := strings.Split(gitURL, "/")
+	if len(parts) >= 2 {
+		// Get last two parts (org/repo)
+		return strings.ReplaceAll(fmt.Sprintf("%s-%s", parts[len(parts)-2], parts[len(parts)-1]), "/", "-")
+	}
+	// Fallback to full URL conversion
+	return strings.ReplaceAll(strings.ReplaceAll(gitURL, "/", "-"), ":", "-")
+}
+
+func addGitRepoToCachePlan(gitURL, branch, name string) error {
+	ctx := context.Background()
+
+	client, err := getDynamicClient()
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+
+	gvr := schema.GroupVersionResource{
+		Group:    "canhazgpu.dev",
+		Version:  "v1alpha1",
+		Resource: "cacheplans",
+	}
+
+	// Try to get existing plan
+	plan, err := client.Resource(gvr).Get(ctx, "default", metav1.GetOptions{})
+	if err != nil {
+		// Create new plan if not exists
+		plan = &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "canhazgpu.dev/v1alpha1",
+				"kind":       "CachePlan",
+				"metadata": map[string]interface{}{
+					"name": "default",
+				},
+				"spec": map[string]interface{}{
+					"items": []interface{}{},
+				},
+			},
+		}
+	}
+
+	// Add git repo item
+	spec, found, err := unstructured.NestedMap(plan.Object, "spec")
+	if err != nil || !found {
+		spec = make(map[string]interface{})
+	}
+
+	items, found, err := unstructured.NestedSlice(spec, "items")
+	if err != nil || !found {
+		items = []interface{}{}
+	}
+
+	newItem := map[string]interface{}{
+		"type":  "gitRepo",
+		"name":  name,
+		"scope": "allNodes",
+		"gitRepo": map[string]interface{}{
+			"url":      gitURL,
+			"branch":   branch,
+			"pathName": name, // Use the generated name as the path
+		},
+	}
+
+	items = append(items, newItem)
+	spec["items"] = items
+	plan.Object["spec"] = spec
+
+	// Create or update
+	if plan.GetResourceVersion() == "" {
+		_, err = client.Resource(gvr).Create(ctx, plan, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to create cache plan: %w", err)
+		}
+		fmt.Printf("✓ Created cache plan with git repo %s\n", gitURL)
+	} else {
+		_, err = client.Resource(gvr).Update(ctx, plan, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update cache plan: %w", err)
+		}
+		fmt.Printf("✓ Added git repo %s (branch: %s) to cache plan\n", gitURL, branch)
+	}
+
+	return nil
 }

@@ -45,6 +45,8 @@ spec:
                   properties:
                     name:
                       type: string
+                    ref:
+                      type: string
                     path:
                       type: string
                     url:
@@ -53,6 +55,11 @@ spec:
                       type: string
                     commit:
                       type: string
+                    present:
+                      type: boolean
+                    status:
+                      type: string
+                      enum: ["pulling", "ready", "failed"]
                     synced:
                       type: boolean
                     lastSync:

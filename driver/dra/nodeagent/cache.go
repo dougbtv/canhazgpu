@@ -43,16 +43,22 @@ func (r *SimpleCacheReconciler) Reconcile(ctx context.Context) error {
 		klog.Errorf("Failed to create cache directory: %v", err)
 	}
 
+	// Check git availability
+	if err := r.checkGitAvailability(); err != nil {
+		klog.Warningf("Git not available: %v - git repository caching will be disabled", err)
+	}
+
 	// Get cache plans and process them
-	pulledImages, errors := r.processCachePlans(ctx)
+	pulledImages, clonedRepos, errors := r.processCachePlans(ctx)
 
 	// Create or update NodeCacheStatus with actual results
-	return r.updateNodeCacheStatus(ctx, pulledImages, errors)
+	return r.updateNodeCacheStatus(ctx, pulledImages, clonedRepos, errors)
 }
 
 // processCachePlans fetches cache plans and pulls required images
-func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[string]interface{}, []string) {
+func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[string]interface{}, []map[string]interface{}, []string) {
 	var pulledImages []map[string]interface{}
+	var clonedRepos []map[string]interface{}
 	var errors []string
 
 	// Get cache plans
@@ -60,7 +66,7 @@ func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[st
 	if err != nil {
 		klog.Errorf("Failed to get cache plans: %v", err)
 		errors = append(errors, fmt.Sprintf("Failed to get cache plans: %v", err))
-		return pulledImages, errors
+		return pulledImages, clonedRepos, errors
 	}
 
 	// Calculate cache plan hash to detect changes
@@ -80,7 +86,8 @@ func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[st
 	} else {
 		klog.V(4).Infof("Skipping reconciliation - last full reconcile was %v ago (< 1 hour) and no plan changes", timeSinceLastFull)
 		// Return current status without pulling
-		return r.getCurrentImageStatus(), errors
+		images, repos := r.getCurrentStatus()
+		return images, repos, errors
 	}
 
 	if shouldFullReconcile {
@@ -101,65 +108,199 @@ func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[st
 			}
 
 			itemType, ok := itemMap["type"].(string)
-			if !ok || itemType != "image" {
-				continue
-			}
-
-			// Extract image reference
-			imageData, ok := itemMap["image"].(map[string]interface{})
 			if !ok {
 				continue
 			}
 
-			imageRef, ok := imageData["ref"].(string)
-			if !ok {
-				continue
+			switch itemType {
+			case "image":
+				r.processImageItem(itemMap, planChanged, &pulledImages, &errors)
+			case "gitRepo":
+				r.processGitRepoItem(itemMap, planChanged, &clonedRepos, &errors)
 			}
-
-			// Check if image is already successfully cached
-			currentStatus, exists := r.currentImageStatus[imageRef]
-			if exists && currentStatus["status"] == "ready" && !planChanged {
-				klog.V(4).Infof("Image %s already ready, skipping pull", imageRef)
-				pulledImages = append(pulledImages, currentStatus)
-				continue
-			}
-
-			// First, add the image as "pulling" status
-			pullingImage := map[string]interface{}{
-				"ref":         imageRef,
-				"present":     false,
-				"status":      "pulling",
-				"digest":      "",
-				"lastChecked": time.Now().Format(time.RFC3339),
-				"message":     "Pulling image...",
-			}
-
-			// Pull the image
-			klog.Infof("Pulling image: %s", imageRef)
-			if err := r.pullImage(imageRef); err != nil {
-				klog.Errorf("Failed to pull image %s: %v", imageRef, err)
-				errors = append(errors, fmt.Sprintf("Failed to pull image %s: %v", imageRef, err))
-				// Update status to failed
-				pullingImage["status"] = "failed"
-				pullingImage["present"] = false
-				pullingImage["message"] = fmt.Sprintf("Pull failed: %v", err)
-				pullingImage["lastChecked"] = time.Now().Format(time.RFC3339)
-			} else {
-				klog.Infof("Successfully pulled image: %s", imageRef)
-				// Update status to ready
-				pullingImage["status"] = "ready"
-				pullingImage["present"] = true
-				pullingImage["message"] = "Successfully pulled"
-				pullingImage["lastChecked"] = time.Now().Format(time.RFC3339)
-			}
-
-			// Update our cache
-			r.currentImageStatus[imageRef] = pullingImage
-			pulledImages = append(pulledImages, pullingImage)
 		}
 	}
 
-	return pulledImages, errors
+	return pulledImages, clonedRepos, errors
+}
+
+// processImageItem handles processing of image cache items
+func (r *SimpleCacheReconciler) processImageItem(itemMap map[string]interface{}, planChanged bool, pulledImages *[]map[string]interface{}, errors *[]string) {
+	imageData, ok := itemMap["image"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	imageRef, ok := imageData["ref"].(string)
+	if !ok {
+		return
+	}
+
+	name, _ := itemMap["name"].(string)
+	if name == "" {
+		name = imageRef
+	}
+
+	// Check if we already have status for this image
+	existingStatus, exists := r.currentImageStatus[imageRef]
+
+	// If plan didn't change and we have recent status, use it
+	if !planChanged && exists {
+		*pulledImages = append(*pulledImages, existingStatus)
+		return
+	}
+
+	// Create status entry for this image
+	imageStatus := map[string]interface{}{
+		"ref":     imageRef,
+		"name":    name,
+		"present": false,
+		"status":  "pulling",
+		"message": "Pulling image...",
+	}
+
+	// Add to results immediately to show pulling status
+	*pulledImages = append(*pulledImages, imageStatus)
+	r.currentImageStatus[imageRef] = imageStatus
+
+	// Actually pull the image
+	err := r.pullImage(imageRef)
+	if err != nil {
+		klog.Errorf("Failed to pull image %s: %v", imageRef, err)
+		imageStatus["status"] = "failed"
+		imageStatus["message"] = fmt.Sprintf("Pull failed: %v", err)
+		*errors = append(*errors, fmt.Sprintf("Failed to pull image %s: %v", imageRef, err))
+	} else {
+		klog.Infof("Successfully pulled image %s", imageRef)
+		imageStatus["status"] = "ready"
+		imageStatus["present"] = true
+		imageStatus["message"] = "Pull completed successfully"
+	}
+
+	// Update the stored status
+	r.currentImageStatus[imageRef] = imageStatus
+}
+
+// processGitRepoItem handles processing of git repository cache items
+func (r *SimpleCacheReconciler) processGitRepoItem(itemMap map[string]interface{}, planChanged bool, clonedRepos *[]map[string]interface{}, errors *[]string) {
+	gitRepoData, ok := itemMap["gitRepo"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	gitURL, ok := gitRepoData["url"].(string)
+	if !ok {
+		return
+	}
+
+	branch, ok := gitRepoData["branch"].(string)
+	if !ok {
+		branch = "main" // default branch
+	}
+
+	name, _ := itemMap["name"].(string)
+	if name == "" {
+		name = gitURL
+	}
+
+	// Get the pathName from gitRepo data for directory naming
+	pathName, ok := gitRepoData["pathName"].(string)
+	if !ok || pathName == "" {
+		pathName = name // fallback to name if pathName not specified
+	}
+
+	// Check if we already have status for this repo
+	repoKey := fmt.Sprintf("%s#%s", gitURL, branch)
+	existingStatus, exists := r.currentImageStatus[repoKey] // Reusing image status map for simplicity
+
+	// If plan didn't change and we have recent status, use it
+	if !planChanged && exists {
+		*clonedRepos = append(*clonedRepos, existingStatus)
+		return
+	}
+
+	// Create status entry for this git repo
+	repoStatus := map[string]interface{}{
+		"ref":     gitURL,
+		"name":    name,
+		"branch":  branch,
+		"present": false,
+		"status":  "pulling",
+		"message": fmt.Sprintf("Cloning repository (branch: %s)...", branch),
+	}
+
+	// Add to results immediately to show pulling status
+	*clonedRepos = append(*clonedRepos, repoStatus)
+	r.currentImageStatus[repoKey] = repoStatus
+
+	// Actually clone the repository
+	err := r.cloneGitRepo(gitURL, branch, pathName)
+	if err != nil {
+		klog.Errorf("Failed to clone git repo %s (branch: %s): %v", gitURL, branch, err)
+		repoStatus["status"] = "failed"
+		repoStatus["message"] = fmt.Sprintf("Clone failed: %v", err)
+		*errors = append(*errors, fmt.Sprintf("Failed to clone git repo %s (branch: %s): %v", gitURL, branch, err))
+	} else {
+		klog.Infof("Successfully cloned git repo %s (branch: %s)", gitURL, branch)
+		repoStatus["status"] = "ready"
+		repoStatus["present"] = true
+		repoStatus["message"] = fmt.Sprintf("Clone completed successfully (branch: %s)", branch)
+	}
+
+	// Update the stored status
+	r.currentImageStatus[repoKey] = repoStatus
+}
+
+// checkGitAvailability verifies git is available in the container
+func (r *SimpleCacheReconciler) checkGitAvailability() error {
+	cmd := exec.Command("git", "--version")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git command not found: %v", err)
+	}
+	klog.V(4).Infof("Git available: %s", strings.TrimSpace(string(output)))
+	return nil
+}
+
+// cloneGitRepo clones a git repository to the cache directory
+func (r *SimpleCacheReconciler) cloneGitRepo(gitURL, branch, name string) error {
+	// Check git availability first
+	if err := r.checkGitAvailability(); err != nil {
+		return fmt.Errorf("git not available: %v", err)
+	}
+
+	cacheDir := "/var/lib/canhazgpu-cache"
+
+	// Create a directory name based on the repo name
+	repoDir := fmt.Sprintf("%s/%s", cacheDir, name)
+
+	// Check if directory already exists
+	if _, err := os.Stat(repoDir); err == nil {
+		// Directory exists, try to update it
+		klog.V(4).Infof("Repository directory %s exists, updating...", repoDir)
+
+		// Change to repo directory and pull latest
+		cmd := exec.Command("git", "-C", repoDir, "pull", "origin", branch)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			klog.V(4).Infof("Git pull failed, trying fresh clone: %v, output: %s", err, string(output))
+			// Remove directory and do fresh clone
+			os.RemoveAll(repoDir)
+		} else {
+			klog.V(4).Infof("Git pull output: %s", string(output))
+			return nil
+		}
+	}
+
+	// Fresh clone
+	cmd := exec.Command("git", "clone", "--branch", branch, "--depth", "1", gitURL, repoDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git clone failed: %v, output: %s", err, string(output))
+	}
+
+	klog.V(4).Infof("Git clone output: %s", string(output))
+	return nil
 }
 
 // getCachePlans fetches all cache plans from the cluster
@@ -188,13 +329,27 @@ func (r *SimpleCacheReconciler) calculatePlanHash(plans []unstructured.Unstructu
 	return fmt.Sprintf("%x", planData.String())
 }
 
-// getCurrentImageStatus returns the current cached image status
-func (r *SimpleCacheReconciler) getCurrentImageStatus() []map[string]interface{} {
+// getCurrentStatus returns the current cached image and git repo status
+func (r *SimpleCacheReconciler) getCurrentStatus() ([]map[string]interface{}, []map[string]interface{}) {
 	var images []map[string]interface{}
-	for _, status := range r.currentImageStatus {
-		images = append(images, status)
+	var repos []map[string]interface{}
+
+	for key, status := range r.currentImageStatus {
+		if ref, ok := status["ref"].(string); ok {
+			// Check if this is a git repo (contains #branch in key or is a git URL)
+			if contains(key, "#") || contains(ref, "github.com") || contains(ref, "gitlab.com") || contains(ref, ".git") {
+				repos = append(repos, status)
+			} else {
+				images = append(images, status)
+			}
+		}
 	}
-	return images
+	return images, repos
+}
+
+// Helper function to check if string contains substring
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
 
 // pullImage pulls an image using crictl
@@ -210,7 +365,7 @@ func (r *SimpleCacheReconciler) pullImage(imageRef string) error {
 }
 
 // updateNodeCacheStatus creates/updates the NodeCacheStatus
-func (r *SimpleCacheReconciler) updateNodeCacheStatus(ctx context.Context, pulledImages []map[string]interface{}, errors []string) error {
+func (r *SimpleCacheReconciler) updateNodeCacheStatus(ctx context.Context, pulledImages []map[string]interface{}, clonedRepos []map[string]interface{}, errors []string) error {
 	gvr := schema.GroupVersionResource{
 		Group:    "canhazgpu.dev",
 		Version:  "v1alpha1",
@@ -242,7 +397,7 @@ func (r *SimpleCacheReconciler) updateNodeCacheStatus(ctx context.Context, pulle
 			"status": map[string]interface{}{
 				"nodeName":   r.nodeName,
 				"images":     pulledImages,
-				"gitRepos":   []interface{}{},
+				"gitRepos":   clonedRepos,
 				"errors":     errors,
 				"lastUpdate": time.Now().Format(time.RFC3339),
 			},
@@ -267,7 +422,7 @@ func (r *SimpleCacheReconciler) updateNodeCacheStatus(ctx context.Context, pulle
 			klog.Errorf("Failed to update status for NodeCacheStatus %s: %v", r.nodeName, err)
 			return err
 		}
-		klog.Infof("Updated status for NodeCacheStatus %s with %d images", r.nodeName, len(pulledImages))
+		klog.Infof("Updated status for NodeCacheStatus %s with %d images and %d git repos", r.nodeName, len(pulledImages), len(clonedRepos))
 	} else {
 		// Update status subresource for existing resource
 		statusData.SetResourceVersion(existing.GetResourceVersion())
@@ -276,7 +431,7 @@ func (r *SimpleCacheReconciler) updateNodeCacheStatus(ctx context.Context, pulle
 			klog.Errorf("Failed to update status for NodeCacheStatus %s: %v", r.nodeName, err)
 			return err
 		}
-		klog.Infof("Updated status for NodeCacheStatus %s with %d images", r.nodeName, len(pulledImages))
+		klog.Infof("Updated status for NodeCacheStatus %s with %d images and %d git repos", r.nodeName, len(pulledImages), len(clonedRepos))
 	}
 
 	return nil
