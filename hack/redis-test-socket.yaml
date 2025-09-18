@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: redis-socket-check
+  namespace: canhazgpu-system
+spec:
+  selector:
+    matchLabels: { app: redis-socket-check }
+  template:
+    metadata:
+      labels: { app: redis-socket-check }
+    spec:
+      containers:
+      - name: check
+        image: redis:7-alpine
+        securityContext:
+          privileged: true
+        command: ["/bin/sh","-c"]
+        args:
+          - 'redis-cli -s /host/run/redis/redis.sock PING && sleep 3600'
+        readinessProbe:
+          exec:
+            command: ["redis-cli","-s","/host/run/redis/redis.sock","PING"]
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        volumeMounts:
+        - name: redis-sock
+          mountPath: /host/run/redis/redis.sock
+          readOnly: true
+      volumes:
+      - name: redis-sock
+        hostPath:
+          path: /run/redis/redis.sock
+          type: Socket
