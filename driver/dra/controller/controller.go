@@ -450,24 +450,47 @@ func (r *ResourceClaimController) createVLLMPod(ctx context.Context, claim *reso
 		return nil, fmt.Errorf("failed to resolve cache items: %w", err)
 	}
 
-	// Parse command - the CLI stores the full command as a string
-	var cmdArgs []string
-	if cmdStr == "" {
-		cmdArgs = []string{"/bin/sh", "-c", "sleep 300"}
-	} else if cmdStr == "/bin/sh -c sleep 300" {
-		// Handle the default case specially - pass the full command to sh -c as one string
-		cmdArgs = []string{"/bin/sh", "-c", "sleep 300"}
+	// Parse command and wrap it with vLLM setup
+	var userCmd string
+	if cmdStr == "" || cmdStr == "/bin/sh -c sleep 300" {
+		userCmd = "sleep 300"
+	} else if strings.HasPrefix(cmdStr, "/bin/sh -c ") {
+		// Extract the command part after "/bin/sh -c "
+		userCmd = strings.TrimPrefix(cmdStr, "/bin/sh -c ")
 	} else {
-		// For other commands, check if it starts with /bin/sh -c and handle properly
-		if strings.HasPrefix(cmdStr, "/bin/sh -c ") {
-			// Extract the command part after "/bin/sh -c "
-			innerCmd := strings.TrimPrefix(cmdStr, "/bin/sh -c ")
-			cmdArgs = []string{"/bin/sh", "-c", innerCmd}
-		} else {
-			// Split the command string into arguments for direct execution
-			cmdArgs = strings.Fields(cmdStr)
-		}
+		// Treat as direct command
+		userCmd = cmdStr
 	}
+
+	// Create wrapper script that sets up vLLM workspace and runs user command
+	// Properly escape the user command for shell execution
+	escapedUserCmd := strings.ReplaceAll(userCmd, "'", "'\"'\"'")
+
+	wrapperScript := fmt.Sprintf(`
+# vLLM workspace setup (replicating CI pattern)
+echo "Setting up vLLM workspace..."
+
+# Copy in the code from the checkout to the workspace
+rm -rf /vllm-workspace/vllm || true
+cp -a /workdir/. /vllm-workspace/
+
+# Overlay the pure-Python vllm into the install package dir
+export SITEPKG="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+cp -a /vllm-workspace/vllm/* "$SITEPKG/vllm/"
+
+# Restore src/ layout, as Dockerfile does. Hides code from tests, but allows setup.
+rm -rf /vllm-workspace/src || true
+mkdir -p /vllm-workspace/src
+mv /vllm-workspace/vllm /vllm-workspace/src/vllm
+
+echo "vLLM workspace setup complete. Running user command..."
+cd /vllm-workspace
+
+# Now exec the user command (properly escaped)
+exec sh -c '%s'
+`, escapedUserCmd)
+
+	cmdArgs := []string{"/bin/sh", "-c", wrapperScript}
 
 	// Create Pod with vLLM-specific mounts
 	pod := &corev1.Pod{

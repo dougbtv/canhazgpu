@@ -26,3 +26,9 @@ k8shazgpu cache status
 
 k8shazgpu cache add gitrepo https://github.com/vllm-project/vllm.git --branch main --name vllm-main
 
+# testing notes
+k8shazgpu vllm run --name vllm-dev-privileged -- sleep 500
+k8shazgpu cleanup --name vllm-dev-privileged
+
+vllm serve facebook/opt-125m \
+  --gpu-memory-utilization 0.8
