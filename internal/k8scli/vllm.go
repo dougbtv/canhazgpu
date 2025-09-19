@@ -73,6 +73,15 @@ The Pod will have access to the cached git repository at /workdir and model cach
 			PreferNode: preferNode,
 		}
 
+		// Trigger cache updates for fresh code before creating Pod
+		fmt.Printf("Updating cached git repository %s for fresh code...\n", repoName)
+		if err := updateGitRepoCache(repoName, false); err != nil {
+			fmt.Printf("Warning: Failed to trigger cache update for %s: %v\n", repoName, err)
+			fmt.Printf("Continuing with existing cached version...\n")
+		} else {
+			fmt.Printf("✓ Triggered cache update for %s\n", repoName)
+		}
+
 		fmt.Printf("Creating ResourceClaim %s for vLLM workload requesting %d GPU(s)...\n", claimName, gpus)
 
 		// Create ResourceClaim with vLLM-specific annotations

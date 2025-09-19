@@ -96,6 +96,9 @@ func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[st
 
 	// Process each cache plan
 	for _, plan := range cachePlans {
+		// Check for cache update annotations first
+		updateRequests := r.checkForUpdateAnnotations(&plan)
+
 		items, ok := plan.Object["spec"].(map[string]interface{})["items"].([]interface{})
 		if !ok {
 			continue
@@ -112,11 +115,16 @@ func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[st
 				continue
 			}
 
+			name, _ := itemMap["name"].(string)
+
+			// Check if this item has a pending update request
+			updateRequest, hasUpdate := updateRequests[name]
+
 			switch itemType {
 			case "image":
 				r.processImageItem(itemMap, planChanged, &pulledImages, &errors)
 			case "gitRepo":
-				r.processGitRepoItem(itemMap, planChanged, &clonedRepos, &errors)
+				r.processGitRepoItem(itemMap, planChanged || hasUpdate, updateRequest, &clonedRepos, &errors)
 			}
 		}
 	}
@@ -181,8 +189,44 @@ func (r *SimpleCacheReconciler) processImageItem(itemMap map[string]interface{},
 	r.currentImageStatus[imageRef] = imageStatus
 }
 
+// UpdateRequest represents a cache update request from annotations
+type UpdateRequest struct {
+	Timestamp string
+	Force     bool
+}
+
+// checkForUpdateAnnotations checks for cache update annotations in the cache plan
+func (r *SimpleCacheReconciler) checkForUpdateAnnotations(plan *unstructured.Unstructured) map[string]UpdateRequest {
+	updateRequests := make(map[string]UpdateRequest)
+
+	annotations := plan.GetAnnotations()
+	if annotations == nil {
+		return updateRequests
+	}
+
+	for key, value := range annotations {
+		// Look for update annotations: canhazgpu.dev/update-repo-{name}
+		if strings.HasPrefix(key, "canhazgpu.dev/update-repo-") {
+			repoName := strings.TrimPrefix(key, "canhazgpu.dev/update-repo-")
+
+			// Check for corresponding force annotation
+			forceKey := fmt.Sprintf("canhazgpu.dev/force-update-%s", repoName)
+			force := annotations[forceKey] == "true"
+
+			updateRequests[repoName] = UpdateRequest{
+				Timestamp: value,
+				Force:     force,
+			}
+
+			klog.Infof("Found update request for repo %s: timestamp=%s, force=%v", repoName, value, force)
+		}
+	}
+
+	return updateRequests
+}
+
 // processGitRepoItem handles processing of git repository cache items
-func (r *SimpleCacheReconciler) processGitRepoItem(itemMap map[string]interface{}, planChanged bool, clonedRepos *[]map[string]interface{}, errors *[]string) {
+func (r *SimpleCacheReconciler) processGitRepoItem(itemMap map[string]interface{}, shouldUpdate bool, updateRequest UpdateRequest, clonedRepos *[]map[string]interface{}, errors *[]string) {
 	gitRepoData, ok := itemMap["gitRepo"].(map[string]interface{})
 	if !ok {
 		return
@@ -213,28 +257,35 @@ func (r *SimpleCacheReconciler) processGitRepoItem(itemMap map[string]interface{
 	repoKey := fmt.Sprintf("%s#%s", gitURL, branch)
 	existingStatus, exists := r.currentImageStatus[repoKey] // Reusing image status map for simplicity
 
-	// If plan didn't change and we have recent status, use it
-	if !planChanged && exists {
+	// If no changes and no update request and we have recent status, use it
+	if !shouldUpdate && exists {
 		*clonedRepos = append(*clonedRepos, existingStatus)
 		return
 	}
 
 	// Create status entry for this git repo
+	statusMessage := fmt.Sprintf("Cloning repository (branch: %s)...", branch)
+	if updateRequest.Force {
+		statusMessage = fmt.Sprintf("Force updating repository (branch: %s)...", branch)
+	} else if shouldUpdate && updateRequest.Timestamp != "" {
+		statusMessage = fmt.Sprintf("Updating repository (branch: %s)...", branch)
+	}
+
 	repoStatus := map[string]interface{}{
 		"ref":     gitURL,
 		"name":    name,
 		"branch":  branch,
 		"present": false,
 		"status":  "pulling",
-		"message": fmt.Sprintf("Cloning repository (branch: %s)...", branch),
+		"message": statusMessage,
 	}
 
 	// Add to results immediately to show pulling status
 	*clonedRepos = append(*clonedRepos, repoStatus)
 	r.currentImageStatus[repoKey] = repoStatus
 
-	// Actually clone the repository
-	err := r.cloneGitRepo(gitURL, branch, pathName)
+	// Actually clone/update the repository
+	err := r.cloneGitRepo(gitURL, branch, pathName, updateRequest.Force)
 	if err != nil {
 		klog.Errorf("Failed to clone git repo %s (branch: %s): %v", gitURL, branch, err)
 		repoStatus["status"] = "failed"
@@ -263,7 +314,7 @@ func (r *SimpleCacheReconciler) checkGitAvailability() error {
 }
 
 // cloneGitRepo clones a git repository to the cache directory
-func (r *SimpleCacheReconciler) cloneGitRepo(gitURL, branch, name string) error {
+func (r *SimpleCacheReconciler) cloneGitRepo(gitURL, branch, name string, force bool) error {
 	// Check git availability first
 	if err := r.checkGitAvailability(); err != nil {
 		return fmt.Errorf("git not available: %v", err)
@@ -276,19 +327,43 @@ func (r *SimpleCacheReconciler) cloneGitRepo(gitURL, branch, name string) error 
 
 	// Check if directory already exists
 	if _, err := os.Stat(repoDir); err == nil {
-		// Directory exists, try to update it
-		klog.V(4).Infof("Repository directory %s exists, updating...", repoDir)
+		// Directory exists, handle based on force flag
+		if force {
+			klog.Infof("Force update requested for %s, performing fetch and reset", repoDir)
 
-		// Change to repo directory and pull latest
-		cmd := exec.Command("git", "-C", repoDir, "pull", "origin", branch)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			klog.V(4).Infof("Git pull failed, trying fresh clone: %v, output: %s", err, string(output))
-			// Remove directory and do fresh clone
-			os.RemoveAll(repoDir)
+			// Force update: fetch latest and reset to remote HEAD
+			fetchCmd := exec.Command("git", "-C", repoDir, "fetch", "origin", branch)
+			fetchOutput, fetchErr := fetchCmd.CombinedOutput()
+			if fetchErr != nil {
+				klog.V(4).Infof("Git fetch failed, trying fresh clone: %v, output: %s", fetchErr, string(fetchOutput))
+				os.RemoveAll(repoDir)
+			} else {
+				// Reset to remote HEAD (handles force pushes)
+				resetCmd := exec.Command("git", "-C", repoDir, "reset", "--hard", fmt.Sprintf("origin/%s", branch))
+				resetOutput, resetErr := resetCmd.CombinedOutput()
+				if resetErr != nil {
+					klog.V(4).Infof("Git reset failed, trying fresh clone: %v, output: %s", resetErr, string(resetOutput))
+					os.RemoveAll(repoDir)
+				} else {
+					klog.V(4).Infof("Git force update successful: %s", string(resetOutput))
+					return nil
+				}
+			}
 		} else {
-			klog.V(4).Infof("Git pull output: %s", string(output))
-			return nil
+			// Regular update: try pull
+			klog.V(4).Infof("Repository directory %s exists, updating...", repoDir)
+
+			// Change to repo directory and pull latest
+			cmd := exec.Command("git", "-C", repoDir, "pull", "origin", branch)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				klog.V(4).Infof("Git pull failed, trying fresh clone: %v, output: %s", err, string(output))
+				// Remove directory and do fresh clone
+				os.RemoveAll(repoDir)
+			} else {
+				klog.V(4).Infof("Git pull output: %s", string(output))
+				return nil
+			}
 		}
 	}
 
