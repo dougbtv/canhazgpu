@@ -109,6 +109,46 @@ func (c *Client) CreateResourceClaimWithPodSpec(ctx context.Context, req *Reserv
 	return c.resourceClient.ResourceClaims(c.namespace).Create(ctx, claim, metav1.CreateOptions{})
 }
 
+func (c *Client) CreateResourceClaimWithVLLMAnnotations(ctx context.Context, req *ReservationRequest, imageName, repoName string, cmdArgs []string) (*resourceapi.ResourceClaim, error) {
+	// Create ResourceClaimSpec for v1beta1 API
+	spec := resourceapi.ResourceClaimSpec{
+		Devices: resourceapi.DeviceClaim{
+			Requests: []resourceapi.DeviceRequest{
+				{
+					Name:            "gpu-request",
+					DeviceClassName: DeviceClassName,
+					AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+					Count:           int64(req.GPUCount),
+				},
+			},
+		},
+	}
+
+	// Create annotations for vLLM workload
+	annotations := map[string]string{
+		"canhazgpu.dev/workload":   "vllm",
+		"canhazgpu.dev/image-name": imageName,
+		"canhazgpu.dev/repo-name":  repoName,
+		"canhazgpu.dev/cmd":        strings.Join(cmdArgs, " "),
+	}
+
+	// Add prefer-node annotation if specified
+	if req.PreferNode != "" {
+		annotations["canhazgpu.dev/prefer-node"] = req.PreferNode
+	}
+
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        req.Name,
+			Namespace:   c.namespace,
+			Annotations: annotations,
+		},
+		Spec: spec,
+	}
+
+	return c.resourceClient.ResourceClaims(c.namespace).Create(ctx, claim, metav1.CreateOptions{})
+}
+
 func (c *Client) WaitForAllocation(ctx context.Context, claimName string) (*AllocationResult, error) {
 	return c.WaitForAllocationWithTimeout(ctx, claimName, 5*time.Minute)
 }

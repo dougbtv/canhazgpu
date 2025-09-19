@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -353,54 +355,70 @@ func (r *ResourceClaimController) AutoReconcilePods(ctx context.Context) error {
 			continue
 		}
 
-		// Skip if claim doesn't have pod-spec annotation
-		podSpecJSON, exists := claim.Annotations["k8shazgpu.com/pod-spec"]
-		if !exists {
-			continue
-		}
+		// Check for vLLM workload annotation first
+		workloadType, isVLLM := claim.Annotations["canhazgpu.dev/workload"]
 
-		// Parse Pod spec from annotation
-		var podSpec struct {
-			Image   string   `json:"image"`
-			Command []string `json:"command"`
-		}
-		if err := json.Unmarshal([]byte(podSpecJSON), &podSpec); err != nil {
-			ctrl.Log.WithName("auto-reconciler").Error(err, "failed to parse pod spec", "claim", claim.Name)
-			continue
+		var pod *corev1.Pod
+		var err error
+
+		if isVLLM && workloadType == "vllm" {
+			// Handle vLLM workload
+			pod, err = r.createVLLMPod(ctx, &claim)
+			if err != nil {
+				ctrl.Log.WithName("auto-reconciler").Error(err, "failed to create vLLM Pod", "claim", claim.Name)
+				continue
+			}
+		} else {
+			// Check for traditional pod-spec annotation
+			podSpecJSON, exists := claim.Annotations["k8shazgpu.com/pod-spec"]
+			if !exists {
+				continue
+			}
+
+			// Parse Pod spec from annotation
+			var podSpec struct {
+				Image   string   `json:"image"`
+				Command []string `json:"command"`
+			}
+			if err := json.Unmarshal([]byte(podSpecJSON), &podSpec); err != nil {
+				ctrl.Log.WithName("auto-reconciler").Error(err, "failed to parse pod spec", "claim", claim.Name)
+				continue
+			}
+
+			// Create traditional Pod for this claim
+			pod = &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      claim.Name + "-pod",
+					Namespace: claim.Namespace,
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:    "gpu-workload",
+							Image:   podSpec.Image,
+							Command: podSpec.Command,
+						},
+					},
+					ResourceClaims: []corev1.PodResourceClaim{
+						{
+							Name: "gpu-claim",
+							ResourceClaimName: &claim.Name,
+						},
+					},
+				},
+			}
+
+			// Add resource claim reference to container
+			pod.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{
+				{
+					Name: "gpu-claim",
+				},
+			}
 		}
 
 		// Create Pod for this claim
 		ctrl.Log.WithName("auto-reconciler").Info("creating Pod for allocated claim", "claim", claim.Name)
-
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      claim.Name + "-pod",
-				Namespace: claim.Namespace,
-			},
-			Spec: corev1.PodSpec{
-				RestartPolicy: corev1.RestartPolicyNever,
-				Containers: []corev1.Container{
-					{
-						Name:    "gpu-workload",
-						Image:   podSpec.Image,
-						Command: podSpec.Command,
-					},
-				},
-				ResourceClaims: []corev1.PodResourceClaim{
-					{
-						Name: "gpu-claim",
-						ResourceClaimName: &claim.Name,
-					},
-				},
-			},
-		}
-
-		// Add resource claim reference to container
-		pod.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{
-			{
-				Name: "gpu-claim",
-			},
-		}
 
 		if err := r.Create(ctx, pod); err != nil {
 			ctrl.Log.WithName("auto-reconciler").Error(err, "failed to create Pod", "claim", claim.Name, "pod", pod.Name)
@@ -411,6 +429,192 @@ func (r *ResourceClaimController) AutoReconcilePods(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (r *ResourceClaimController) createVLLMPod(ctx context.Context, claim *resourceapi.ResourceClaim) (*corev1.Pod, error) {
+	logger := log.FromContext(ctx)
+
+	// Extract annotations
+	imageName := claim.Annotations["canhazgpu.dev/image-name"]
+	repoName := claim.Annotations["canhazgpu.dev/repo-name"]
+	cmdStr := claim.Annotations["canhazgpu.dev/cmd"]
+
+	if imageName == "" || repoName == "" || cmdStr == "" {
+		return nil, fmt.Errorf("missing required vLLM annotations: image-name=%s, repo-name=%s, cmd=%s",
+			imageName, repoName, cmdStr)
+	}
+
+	// Get the CachePlan to look up image ref and repo path
+	imageRef, gitPath, err := r.resolveCacheItems(ctx, imageName, repoName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve cache items: %w", err)
+	}
+
+	// Parse command - the CLI stores the full command as a string
+	var cmdArgs []string
+	if cmdStr == "" {
+		cmdArgs = []string{"/bin/sh", "-c", "sleep 300"}
+	} else if cmdStr == "/bin/sh -c sleep 300" {
+		// Handle the default case specially - pass the full command to sh -c as one string
+		cmdArgs = []string{"/bin/sh", "-c", "sleep 300"}
+	} else {
+		// For other commands, check if it starts with /bin/sh -c and handle properly
+		if strings.HasPrefix(cmdStr, "/bin/sh -c ") {
+			// Extract the command part after "/bin/sh -c "
+			innerCmd := strings.TrimPrefix(cmdStr, "/bin/sh -c ")
+			cmdArgs = []string{"/bin/sh", "-c", innerCmd}
+		} else {
+			// Split the command string into arguments for direct execution
+			cmdArgs = strings.Fields(cmdStr)
+		}
+	}
+
+	// Create Pod with vLLM-specific mounts
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claim.Name + "-vllm-pod",
+			Namespace: claim.Namespace,
+			Labels: map[string]string{
+				"app":      "k8shazgpu",
+				"workload": "vllm",
+				"claim":    claim.Name,
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{
+				{
+					Name:    "vllm-workload",
+					Image:   imageRef,
+					Command: cmdArgs,
+					SecurityContext: &corev1.SecurityContext{
+						Privileged: &[]bool{true}[0], // TODO: REMOVE FOR PRODUCTION - dev/inspection only
+					},
+					Env: []corev1.EnvVar{
+						{
+							Name:  "WORKDIR",
+							Value: "/workdir",
+						},
+						{
+							Name:  "MODEL_DIR",
+							Value: "/models",
+						},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "git-repo",
+							MountPath: "/workdir",
+							ReadOnly:  false,
+						},
+						{
+							Name:      "model-cache",
+							MountPath: "/models",
+							ReadOnly:  true,
+						},
+					},
+				},
+			},
+			Volumes: []corev1.Volume{
+				{
+					Name: "git-repo",
+					VolumeSource: corev1.VolumeSource{
+						HostPath: &corev1.HostPathVolumeSource{
+							Path: gitPath,
+							Type: &[]corev1.HostPathType{corev1.HostPathDirectory}[0],
+						},
+					},
+				},
+				{
+					Name: "model-cache",
+					VolumeSource: corev1.VolumeSource{
+						HostPath: &corev1.HostPathVolumeSource{
+							Path: "/var/lib/canhazgpu-cache/hub_cache",
+							Type: &[]corev1.HostPathType{corev1.HostPathDirectory}[0],
+						},
+					},
+				},
+			},
+			ResourceClaims: []corev1.PodResourceClaim{
+				{
+					Name: "gpu-claim",
+					ResourceClaimName: &claim.Name,
+				},
+			},
+		},
+	}
+
+	// Add resource claim reference to container
+	pod.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{
+		{
+			Name: "gpu-claim",
+		},
+	}
+
+	logger.Info("creating vLLM Pod",
+		"claim", claim.Name,
+		"image", imageRef,
+		"gitPath", gitPath,
+		"command", cmdStr)
+
+	return pod, nil
+}
+
+func (r *ResourceClaimController) resolveCacheItems(ctx context.Context, imageName, repoName string) (string, string, error) {
+	// Get CachePlan to resolve image ref and repo path
+	var cachePlan unstructured.Unstructured
+	cachePlan.SetAPIVersion("canhazgpu.dev/v1alpha1")
+	cachePlan.SetKind("CachePlan")
+
+	err := r.Get(ctx, client.ObjectKey{Name: "default"}, &cachePlan)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get CachePlan: %w", err)
+	}
+
+	spec, found, err := unstructured.NestedMap(cachePlan.Object, "spec")
+	if err != nil || !found {
+		return "", "", fmt.Errorf("CachePlan has no spec")
+	}
+
+	items, found, err := unstructured.NestedSlice(spec, "items")
+	if err != nil || !found {
+		return "", "", fmt.Errorf("CachePlan has no items")
+	}
+
+	var imageRef, gitPath string
+
+	// Find image and git repo items
+	for _, item := range items {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		itemType, _ := itemMap["type"].(string)
+		name, _ := itemMap["name"].(string)
+
+		if itemType == "image" && name == imageName {
+			if imageData, ok := itemMap["image"].(map[string]interface{}); ok {
+				if ref, ok := imageData["ref"].(string); ok {
+					imageRef = ref
+				}
+			}
+		} else if itemType == "gitRepo" && name == repoName {
+			if gitData, ok := itemMap["gitRepo"].(map[string]interface{}); ok {
+				if pathName, ok := gitData["pathName"].(string); ok {
+					gitPath = fmt.Sprintf("/var/lib/canhazgpu-cache/%s", pathName)
+				}
+			}
+		}
+	}
+
+	if imageRef == "" {
+		return "", "", fmt.Errorf("image %s not found in CachePlan", imageName)
+	}
+	if gitPath == "" {
+		return "", "", fmt.Errorf("git repo %s not found in CachePlan", repoName)
+	}
+
+	return imageRef, gitPath, nil
 }
 
 func (r *ResourceClaimController) SetupWithManager(mgr ctrl.Manager) error {

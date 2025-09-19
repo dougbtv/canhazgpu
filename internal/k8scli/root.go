@@ -48,6 +48,7 @@ func init() {
 	// Add subcommands
 	rootCmd.AddCommand(reserveCmd)
 	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(vllmCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(cleanupCmd)
 	rootCmd.AddCommand(reconcileCmd)
