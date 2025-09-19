@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -313,8 +315,12 @@ func (c *Client) StreamPodLogs(ctx context.Context, podName string) error {
 	}
 	defer podLogs.Close()
 
-	// TODO: Stream logs to stdout
-	// For now, just return - this would need proper log streaming implementation
+	// Stream logs to stdout
+	_, err = io.Copy(os.Stdout, podLogs)
+	if err != nil {
+		return fmt.Errorf("failed to copy logs to stdout: %w", err)
+	}
+
 	return nil
 }
 
