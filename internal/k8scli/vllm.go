@@ -55,6 +55,11 @@ The Pod will have access to the cached git repository at /workdir and model cach
 			return err
 		}
 
+		port, err := cmd.Flags().GetInt("port")
+		if err != nil {
+			return err
+		}
+
 		// Generate name if not provided
 		if claimName == "" {
 			claimName = fmt.Sprintf("k8shazgpu-vllm-%d", generateRandomSuffix())
@@ -71,6 +76,7 @@ The Pod will have access to the cached git repository at /workdir and model cach
 			GPUCount:   gpus,
 			GPUIDs:     gpuIDs,
 			PreferNode: preferNode,
+			Port:       port,  // Add port mapping
 		}
 
 		// Trigger cache updates for fresh code before creating Pod
@@ -118,6 +124,9 @@ The Pod will have access to the cached git repository at /workdir and model cach
 			fmt.Printf("Warning: Pod may still be starting: %v\n", err)
 		} else {
 			fmt.Printf("✓ Pod %s is running\n", podName)
+			if port > 0 {
+				fmt.Printf("✓ vLLM API server will be available on port %d\n", port)
+			}
 		}
 
 		// Stream logs if requested
@@ -130,6 +139,10 @@ The Pod will have access to the cached git repository at /workdir and model cach
 			fmt.Printf("\nTo exec into the Pod: kubectl exec -it %s -n %s -- /bin/bash\n", podName, namespace)
 			fmt.Printf("To view logs: kubectl logs %s -n %s\n", podName, namespace)
 			fmt.Printf("To cleanup: k8shazgpu cleanup --name %s\n", claimName)
+			if port > 0 {
+				fmt.Printf("To access vLLM API: http://localhost:%d (after setting up port-forward)\n", port)
+				fmt.Printf("To set up port-forward: kubectl port-forward %s %d:%d -n %s\n", podName, port, port, namespace)
+			}
 			fmt.Printf("\nPod mounts:\n")
 			fmt.Printf("  /workdir - Git repository (%s)\n", repoName)
 			fmt.Printf("  /models  - Model cache directory\n")
@@ -147,6 +160,7 @@ func init() {
 	vllmRunCmd.Flags().String("image-name", "vllm-pinned", "Name of cached image to use")
 	vllmRunCmd.Flags().String("repo-name", "dougbtv-vllm", "Name of cached git repository to use")
 	vllmRunCmd.Flags().Bool("follow", false, "Follow Pod logs after creation")
+	vllmRunCmd.Flags().Int("port", 8000, "Port to expose for vLLM API server (0 to disable port mapping)")
 
 	vllmCmd.AddCommand(vllmRunCmd)
 }

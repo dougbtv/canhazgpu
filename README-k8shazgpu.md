@@ -36,5 +36,10 @@ vllm serve facebook/opt-125m \
 
 vllm serve facebook/opt-125m --gpu-memory-utilization 0.8
 
-k8shazgpu vllm run --follow --name vllm-dev-privileged -- vllm serve facebook/opt-125m --gpu-memory-utilization 
+k8shazgpu vllm run --follow --name vllm-dev-privileged -- vllm serve facebook/opt-125m --gpu-memory-utilization 0.8
 
+curl http://10.244.0.145:8000/v1/completions   -H "Content-Type: application/json"   -d '{
+    "model": "facebook/opt-125m",
+    "prompt": "What is the capital of Vermont?",
+    "max_tokens": 200
+  }'

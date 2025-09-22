@@ -10,6 +10,7 @@ type ReservationRequest struct {
 	GPUCount   int
 	GPUIDs     []string
 	PreferNode string
+	Port       int    // Port to expose (0 means no port mapping)
 }
 
 // AllocationResult represents the result of a GPU allocation

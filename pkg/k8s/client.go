@@ -139,6 +139,11 @@ func (c *Client) CreateResourceClaimWithVLLMAnnotations(ctx context.Context, req
 		annotations["canhazgpu.dev/prefer-node"] = req.PreferNode
 	}
 
+	// Add port annotation if specified
+	if req.Port > 0 {
+		annotations["canhazgpu.dev/port"] = fmt.Sprintf("%d", req.Port)
+	}
+
 	claim := &resourceapi.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        req.Name,

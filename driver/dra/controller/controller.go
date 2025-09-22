@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -438,10 +439,19 @@ func (r *ResourceClaimController) createVLLMPod(ctx context.Context, claim *reso
 	imageName := claim.Annotations["canhazgpu.dev/image-name"]
 	repoName := claim.Annotations["canhazgpu.dev/repo-name"]
 	cmdStr := claim.Annotations["canhazgpu.dev/cmd"]
+	portStr := claim.Annotations["canhazgpu.dev/port"]
 
 	if imageName == "" || repoName == "" || cmdStr == "" {
 		return nil, fmt.Errorf("missing required vLLM annotations: image-name=%s, repo-name=%s, cmd=%s",
 			imageName, repoName, cmdStr)
+	}
+
+	// Parse port if specified
+	var port int32
+	if portStr != "" {
+		if portInt, err := strconv.Atoi(portStr); err == nil && portInt > 0 {
+			port = int32(portInt)
+		}
 	}
 
 	// Get the CachePlan to look up image ref and repo path
@@ -492,6 +502,18 @@ exec sh -c '%s'
 
 	cmdArgs := []string{"/bin/sh", "-c", wrapperScript}
 
+	// Set up container ports if specified
+	var containerPorts []corev1.ContainerPort
+	if port > 0 {
+		containerPorts = []corev1.ContainerPort{
+			{
+				Name:          "vllm-api",
+				ContainerPort: port,
+				Protocol:      corev1.ProtocolTCP,
+			},
+		}
+	}
+
 	// Create Pod with vLLM-specific mounts
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -523,6 +545,7 @@ exec sh -c '%s'
 							Value: "/models",
 						},
 					},
+					Ports: containerPorts,
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "git-repo",
