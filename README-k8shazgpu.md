@@ -43,3 +43,22 @@ curl http://10.244.0.145:8000/v1/completions   -H "Content-Type: application/jso
     "prompt": "What is the capital of Vermont?",
     "max_tokens": 200
   }'
+
+
+# Model cache.
+
+
+## Add a public model
+./build/k8shazgpu cache add model facebook/opt-125m
+
+## Add a model with specific revision
+./build/k8shazgpu cache add model microsoft/DialoGPT-medium --revision v1.0
+
+## Add a model with custom name
+./build/k8shazgpu cache add model huggingface/CodeBERTa-small-v1 --name codeberta
+
+## View cache status (shows models separately)
+./build/k8shazgpu cache status
+
+## Set up HF token for private models
+kubectl create secret generic hf-token --from-literal=token=your_token_here -n canhazgpu-system

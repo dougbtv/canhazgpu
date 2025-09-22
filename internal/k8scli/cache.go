@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -235,16 +236,37 @@ var cacheStatusCmd = &cobra.Command{
 				}
 			}
 
-			// Git Repositories section
-			fmt.Printf("\nGit Repositories (%d):\n", len(gitRepos))
+			// Separate git repos and models
+			var actualGitRepos []interface{}
+			var models []interface{}
 
-			if len(gitRepos) == 0 {
+			for _, repo := range gitRepos {
+				repoMap, ok := repo.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				ref := getStringFromMap(repoMap, "ref")
+				// Check if this is a model (contains /) or git repo (contains github.com/.git)
+				if strings.Contains(ref, "github.com") || strings.Contains(ref, "gitlab.com") || strings.Contains(ref, ".git") {
+					actualGitRepos = append(actualGitRepos, repo)
+				} else if strings.Contains(ref, "/") {
+					models = append(models, repo)
+				} else {
+					actualGitRepos = append(actualGitRepos, repo) // fallback to git repos
+				}
+			}
+
+			// Git Repositories section
+			fmt.Printf("\nGit Repositories (%d):\n", len(actualGitRepos))
+
+			if len(actualGitRepos) == 0 {
 				fmt.Println("  No git repositories")
 			} else {
 				fmt.Printf("%-8s %-40s %-10s %-10s %s\n", "STATUS", "REPOSITORY", "BRANCH", "PRESENT", "MESSAGE")
 				fmt.Println("-------------------------------------------------------------------------------------")
 
-				for _, repo := range gitRepos {
+				for _, repo := range actualGitRepos {
 					repoMap, ok := repo.(map[string]interface{})
 					if !ok {
 						continue
@@ -282,6 +304,58 @@ var cacheStatusCmd = &cobra.Command{
 						statusIcon+" "+status,
 						truncateString(ref, 38),
 						truncateString(branch, 8),
+						presentStr,
+						truncateString(message, 30))
+				}
+			}
+
+			// Models section
+			fmt.Printf("\nModels (%d):\n", len(models))
+
+			if len(models) == 0 {
+				fmt.Println("  No models")
+			} else {
+				fmt.Printf("%-8s %-40s %-10s %-10s %s\n", "STATUS", "MODEL", "REVISION", "PRESENT", "MESSAGE")
+				fmt.Println("-------------------------------------------------------------------------------------")
+
+				for _, model := range models {
+					modelMap, ok := model.(map[string]interface{})
+					if !ok {
+						continue
+					}
+
+					ref := getStringFromMap(modelMap, "ref")
+					status := getStringFromMap(modelMap, "status")
+					revision := getStringFromMap(modelMap, "revision")
+					present := getBoolFromMap(modelMap, "present")
+					message := getStringFromMap(modelMap, "message")
+
+					presentStr := "No"
+					if present {
+						presentStr = "Yes"
+					}
+
+					// Add status icon
+					statusIcon := ""
+					switch status {
+					case "pulling":
+						statusIcon = "🔄"
+					case "ready":
+						statusIcon = "✅"
+					case "failed":
+						statusIcon = "❌"
+					default:
+						statusIcon = "❓"
+					}
+
+					if revision == "" {
+						revision = "main"
+					}
+
+					fmt.Printf("%-8s %-40s %-10s %-10s %s\n",
+						statusIcon+" "+status,
+						truncateString(ref, 38),
+						truncateString(revision, 8),
 						presentStr,
 						truncateString(message, 30))
 				}
@@ -327,6 +401,28 @@ var cacheAddGitRepoCmd = &cobra.Command{
 		}
 
 		return addGitRepoToCachePlan(gitURL, branch, name)
+	},
+}
+
+var cacheAddModelCmd = &cobra.Command{
+	Use:   "model <repo-id>",
+	Short: "Add Hugging Face model to cache plan",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		repoId := args[0]
+		name, _ := cmd.Flags().GetString("name")
+		revision, _ := cmd.Flags().GetString("revision")
+
+		if name == "" {
+			// Generate name from repo ID
+			name = generateModelName(repoId)
+		}
+
+		if revision == "" {
+			revision = "main" // default revision
+		}
+
+		return addModelToCachePlan(repoId, revision, name)
 	},
 }
 
@@ -413,6 +509,7 @@ func init() {
 	// Add subcommands
 	cacheAddCmd.AddCommand(cacheAddImageCmd)
 	cacheAddCmd.AddCommand(cacheAddGitRepoCmd)
+	cacheAddCmd.AddCommand(cacheAddModelCmd)
 
 	// Update subcommands
 	cacheUpdateCmd.AddCommand(cacheUpdateGitRepoCmd)
@@ -425,6 +522,8 @@ func init() {
 	cacheAddImageCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
 	cacheAddGitRepoCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
 	cacheAddGitRepoCmd.Flags().String("branch", "", "Git branch to clone (default: main)")
+	cacheAddModelCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
+	cacheAddModelCmd.Flags().String("revision", "", "Model revision to download (default: main)")
 
 	// Update flags
 	cacheUpdateGitRepoCmd.Flags().Bool("force", false, "Force update even with force pushes (git reset --hard)")
@@ -668,6 +767,91 @@ func generateGitRepoName(gitURL string) string {
 	}
 	// Fallback to full URL conversion
 	return strings.ReplaceAll(strings.ReplaceAll(gitURL, "/", "-"), ":", "-")
+}
+
+func generateModelName(repoId string) string {
+	// Extract model name from repo ID
+	// e.g., facebook/opt-125m -> facebook-opt-125m
+	return strings.ReplaceAll(repoId, "/", "-")
+}
+
+func addModelToCachePlan(repoId, revision, name string) error {
+	ctx := context.Background()
+
+	client, err := getDynamicClient()
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+
+	gvr := schema.GroupVersionResource{
+		Group:    "canhazgpu.dev",
+		Version:  "v1alpha1",
+		Resource: "cacheplans",
+	}
+
+	// Try to get existing plan
+	plan, err := client.Resource(gvr).Get(ctx, "default", metav1.GetOptions{})
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to get cache plan: %w", err)
+		}
+		// Create new plan
+		plan = &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "canhazgpu.dev/v1alpha1",
+				"kind":       "CachePlan",
+				"metadata": map[string]interface{}{
+					"name": "default",
+				},
+				"spec": map[string]interface{}{
+					"items": []interface{}{},
+				},
+			},
+		}
+	}
+
+	// Get current items
+	spec, found, err := unstructured.NestedMap(plan.Object, "spec")
+	if !found || err != nil {
+		spec = map[string]interface{}{}
+	}
+
+	items, found, err := unstructured.NestedSlice(spec, "items")
+	if err != nil || !found {
+		items = []interface{}{}
+	}
+
+	newItem := map[string]interface{}{
+		"type":  "models",
+		"name":  name,
+		"scope": "allNodes",
+		"models": map[string]interface{}{
+			"repoId":   repoId,
+			"revision": revision,
+		},
+	}
+
+	items = append(items, newItem)
+	spec["items"] = items
+	plan.Object["spec"] = spec
+
+	if len(plan.Object) == 3 { // Only has apiVersion, kind, metadata
+		// Create new plan
+		_, err = client.Resource(gvr).Create(ctx, plan, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to create cache plan: %w", err)
+		}
+		fmt.Printf("✓ Created cache plan and added model %s (revision: %s)\n", repoId, revision)
+	} else {
+		// Update existing plan
+		_, err = client.Resource(gvr).Update(ctx, plan, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update cache plan: %w", err)
+		}
+		fmt.Printf("✓ Added model %s (revision: %s) to cache plan\n", repoId, revision)
+	}
+
+	return nil
 }
 
 func addGitRepoToCachePlan(gitURL, branch, name string) error {

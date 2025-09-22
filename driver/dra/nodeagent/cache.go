@@ -48,6 +48,11 @@ func (r *SimpleCacheReconciler) Reconcile(ctx context.Context) error {
 		klog.Warningf("Git not available: %v - git repository caching will be disabled", err)
 	}
 
+	// Check huggingface-cli availability
+	if err := r.checkHuggingFaceAvailability(); err != nil {
+		klog.Warningf("Hugging Face CLI not available: %v - model caching will be disabled", err)
+	}
+
 	// Get cache plans and process them
 	pulledImages, clonedRepos, errors := r.processCachePlans(ctx)
 
@@ -125,6 +130,8 @@ func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[st
 				r.processImageItem(itemMap, planChanged, &pulledImages, &errors)
 			case "gitRepo":
 				r.processGitRepoItem(itemMap, planChanged || hasUpdate, updateRequest, &clonedRepos, &errors)
+			case "models":
+				r.processModelItem(itemMap, planChanged, &clonedRepos, &errors)
 			}
 		}
 	}
@@ -313,6 +320,115 @@ func (r *SimpleCacheReconciler) checkGitAvailability() error {
 	return nil
 }
 
+// processModelItem handles processing of model cache items
+func (r *SimpleCacheReconciler) processModelItem(itemMap map[string]interface{}, planChanged bool, clonedRepos *[]map[string]interface{}, errors *[]string) {
+	modelData, ok := itemMap["models"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	repoId, ok := modelData["repoId"].(string)
+	if !ok {
+		return
+	}
+
+	revision, ok := modelData["revision"].(string)
+	if !ok {
+		revision = "main" // default revision
+	}
+
+	name, _ := itemMap["name"].(string)
+	if name == "" {
+		name = repoId
+	}
+
+	// Check if we already have status for this model
+	modelKey := fmt.Sprintf("%s#%s", repoId, revision)
+	existingStatus, exists := r.currentImageStatus[modelKey] // Reusing image status map for simplicity
+
+	// If plan didn't change and we have recent status, use it
+	if !planChanged && exists {
+		*clonedRepos = append(*clonedRepos, existingStatus)
+		return
+	}
+
+	// Create status entry for this model
+	modelStatus := map[string]interface{}{
+		"ref":      repoId,
+		"name":     name,
+		"revision": revision,
+		"present":  false,
+		"status":   "pulling",
+		"message":  fmt.Sprintf("Downloading model (revision: %s)...", revision),
+	}
+
+	// Add to results immediately to show pulling status
+	*clonedRepos = append(*clonedRepos, modelStatus)
+	r.currentImageStatus[modelKey] = modelStatus
+
+	// Actually download the model
+	err := r.downloadModel(repoId, revision)
+	if err != nil {
+		klog.Errorf("Failed to download model %s (revision: %s): %v", repoId, revision, err)
+		modelStatus["status"] = "failed"
+		modelStatus["message"] = fmt.Sprintf("Download failed: %v", err)
+		*errors = append(*errors, fmt.Sprintf("Failed to download model %s (revision: %s): %v", repoId, revision, err))
+	} else {
+		klog.Infof("Successfully downloaded model %s (revision: %s)", repoId, revision)
+		modelStatus["status"] = "ready"
+		modelStatus["present"] = true
+		modelStatus["message"] = fmt.Sprintf("Download completed successfully (revision: %s)", revision)
+	}
+
+	// Update the stored status
+	r.currentImageStatus[modelKey] = modelStatus
+}
+
+// checkHuggingFaceAvailability verifies hf CLI is available in the container
+func (r *SimpleCacheReconciler) checkHuggingFaceAvailability() error {
+	cmd := exec.Command("hf", "version")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("hf command not found: %v", err)
+	}
+	klog.V(4).Infof("Hugging Face CLI available: %s", strings.TrimSpace(string(output)))
+	return nil
+}
+
+// downloadModel downloads a Hugging Face model to the cache directory
+func (r *SimpleCacheReconciler) downloadModel(repoId, revision string) error {
+	// Check hf CLI availability first
+	if err := r.checkHuggingFaceAvailability(); err != nil {
+		return fmt.Errorf("hf CLI not available: %v", err)
+	}
+
+	// Set the cache directory environment variable
+	cacheDir := "/var/lib/canhazgpu-cache/hub_cache"
+	env := append(os.Environ(), fmt.Sprintf("HF_HUB_CACHE=%s", cacheDir))
+
+	// Add HF_TOKEN if available (for private model access)
+	if hfToken := os.Getenv("HF_TOKEN"); hfToken != "" {
+		env = append(env, fmt.Sprintf("HF_TOKEN=%s", hfToken))
+		klog.V(4).Infof("Using HF_TOKEN for authenticated model download")
+	}
+
+	// Download the model using hf CLI
+	args := []string{"download", repoId}
+	if revision != "main" && revision != "" {
+		args = append(args, "--revision", revision)
+	}
+
+	cmd := exec.Command("hf", args...)
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("hf download failed: %v, output: %s", err, string(output))
+	}
+
+	klog.V(4).Infof("Hugging Face download output: %s", string(output))
+	return nil
+}
+
 // cloneGitRepo clones a git repository to the cache directory
 func (r *SimpleCacheReconciler) cloneGitRepo(gitURL, branch, name string, force bool) error {
 	// Check git availability first
@@ -407,19 +523,19 @@ func (r *SimpleCacheReconciler) calculatePlanHash(plans []unstructured.Unstructu
 // getCurrentStatus returns the current cached image and git repo status
 func (r *SimpleCacheReconciler) getCurrentStatus() ([]map[string]interface{}, []map[string]interface{}) {
 	var images []map[string]interface{}
-	var repos []map[string]interface{}
+	var reposAndModels []map[string]interface{}
 
 	for key, status := range r.currentImageStatus {
 		if ref, ok := status["ref"].(string); ok {
-			// Check if this is a git repo (contains #branch in key or is a git URL)
-			if contains(key, "#") || contains(ref, "github.com") || contains(ref, "gitlab.com") || contains(ref, ".git") {
-				repos = append(repos, status)
+			// Check if this is a git repo or model (contains #revision/branch in key or is a git URL or model ID)
+			if contains(key, "#") || contains(ref, "github.com") || contains(ref, "gitlab.com") || contains(ref, ".git") || contains(ref, "/") {
+				reposAndModels = append(reposAndModels, status)
 			} else {
 				images = append(images, status)
 			}
 		}
 	}
-	return images, repos
+	return images, reposAndModels
 }
 
 // Helper function to check if string contains substring

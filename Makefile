@@ -171,6 +171,8 @@ deploy:
 	@kubectl apply -f deploy/controller.yaml
 	@kubectl apply -f deploy/daemonset.yaml
 	@kubectl apply -f deploy/kubeletplugin.yaml
+	@kubectl apply -f deploy/crds/nodecachestatus.yaml
+	@kubectl apply -f deploy/crds/cacheplan.yaml
 
 .PHONY: undeploy
 undeploy:
@@ -181,6 +183,8 @@ undeploy:
 	@kubectl delete -f deploy/resourceclass.yaml --ignore-not-found
 	@kubectl delete -f deploy/rbac.yaml --ignore-not-found
 	@kubectl delete -f deploy/namespace.yaml --ignore-not-found
+	@kubectl delete -f deploy/crds/nodecachestatus.yaml --ignore-not-found
+	@kubectl delete -f deploy/crds/cacheplan.yaml --ignore-not-found
 
 .PHONY: hello
 hello: build-k8s

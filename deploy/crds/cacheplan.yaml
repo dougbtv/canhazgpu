@@ -22,7 +22,7 @@ spec:
                   properties:
                     type:
                       type: string
-                      enum: ["image", "gitRepo", "pythonWheels", "hfModel"]
+                      enum: ["image", "gitRepo", "pythonWheels", "hfModel", "models"]
                     name:
                       type: string
                     scope:
@@ -51,6 +51,18 @@ spec:
                           enum: ["hardReset", "merge"]
                           default: "hardReset"
                       required: ["url", "pathName"]
+                    models:
+                      type: object
+                      properties:
+                        repoId:
+                          type: string
+                        revision:
+                          type: string
+                          default: "main"
+                        cache:
+                          type: string
+                          default: "blobs"
+                      required: ["repoId"]
                     nodeSelector:
                       type: object
                       additionalProperties:

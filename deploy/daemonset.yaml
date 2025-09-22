@@ -34,6 +34,14 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        # Optional Hugging Face token for private model access
+        # Create a secret with: kubectl create secret generic hf-token --from-literal=token=your_token_here -n canhazgpu-system
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+              optional: true
         ports:
         - containerPort: 8082
           name: http
