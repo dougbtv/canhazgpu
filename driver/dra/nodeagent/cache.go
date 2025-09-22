@@ -525,14 +525,17 @@ func (r *SimpleCacheReconciler) getCurrentStatus() ([]map[string]interface{}, []
 	var images []map[string]interface{}
 	var reposAndModels []map[string]interface{}
 
-	for key, status := range r.currentImageStatus {
-		if ref, ok := status["ref"].(string); ok {
-			// Check if this is a git repo or model (contains #revision/branch in key or is a git URL or model ID)
-			if contains(key, "#") || contains(ref, "github.com") || contains(ref, "gitlab.com") || contains(ref, ".git") || contains(ref, "/") {
-				reposAndModels = append(reposAndModels, status)
-			} else {
-				images = append(images, status)
-			}
+	for _, status := range r.currentImageStatus {
+		// Check for unique fields to determine type
+		if _, hasBranch := status["branch"]; hasBranch {
+			// This is a git repository (has branch field)
+			reposAndModels = append(reposAndModels, status)
+		} else if _, hasRevision := status["revision"]; hasRevision {
+			// This is a model (has revision field)
+			reposAndModels = append(reposAndModels, status)
+		} else {
+			// This is an image (has neither branch nor revision)
+			images = append(images, status)
 		}
 	}
 	return images, reposAndModels

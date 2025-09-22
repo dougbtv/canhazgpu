@@ -83,6 +83,10 @@ var cachePlanShowCmd = &cobra.Command{
 				if repo, ok := itemMap["gitRepo"].(map[string]interface{}); ok {
 					ref = getStringFromMap(repo, "url")
 				}
+			} else if itemType == "models" {
+				if model, ok := itemMap["models"].(map[string]interface{}); ok {
+					ref = getStringFromMap(model, "repoId")
+				}
 			}
 
 			fmt.Printf("%-8s  %-48s  %-50s\n", itemType, truncateString(name, 48), truncateString(ref, 50))
@@ -118,8 +122,8 @@ var cacheListCmd = &cobra.Command{
 			return nil
 		}
 
-		fmt.Printf("%-20s %-8s %-8s %-6s %-20s\n", "NODE", "IMAGES", "REPOS", "ERRORS", "LAST_UPDATE")
-		fmt.Println("--------------------------------------------------------------------------------")
+		fmt.Printf("%-20s %-8s %-8s %-8s %-6s %-20s\n", "NODE", "IMAGES", "REPOS", "MODELS", "ERRORS", "LAST_UPDATE")
+		fmt.Println("---------------------------------------------------------------------------------------------")
 
 		for _, item := range list.Items {
 			nodeName := getStringFromUnstructured(&item, "status", "nodeName")
@@ -132,6 +136,34 @@ var cacheListCmd = &cobra.Command{
 			errors := getArrayFromUnstructured(&item, "status", "errors")
 			lastUpdate := getStringFromUnstructured(&item, "status", "lastUpdate")
 
+			// Separate git repos and models
+			var actualGitRepos []interface{}
+			var models []interface{}
+
+			for _, repo := range gitRepos {
+				repoMap, ok := repo.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				// Check for unique fields to determine type
+				if _, hasBranch := repoMap["branch"]; hasBranch {
+					// This is a git repository (has branch field)
+					actualGitRepos = append(actualGitRepos, repo)
+				} else if _, hasRevision := repoMap["revision"]; hasRevision {
+					// This is a model (has revision field)
+					models = append(models, repo)
+				} else {
+					// Fallback: check ref content for backwards compatibility
+					ref := getStringFromMap(repoMap, "ref")
+					if strings.Contains(ref, "github.com") || strings.Contains(ref, "gitlab.com") || strings.Contains(ref, ".git") {
+						actualGitRepos = append(actualGitRepos, repo)
+					} else {
+						models = append(models, repo)
+					}
+				}
+			}
+
 			// Format last update time
 			lastUpdateFormatted := "never"
 			if lastUpdate != "" {
@@ -140,10 +172,11 @@ var cacheListCmd = &cobra.Command{
 				}
 			}
 
-			fmt.Printf("%-20s %-8d %-8d %-6d %-20s\n",
+			fmt.Printf("%-20s %-8d %-8d %-8d %-6d %-20s\n",
 				truncateString(nodeName, 20),
 				len(images),
-				len(gitRepos),
+				len(actualGitRepos),
+				len(models),
 				len(errors),
 				lastUpdateFormatted)
 		}
@@ -246,14 +279,21 @@ var cacheStatusCmd = &cobra.Command{
 					continue
 				}
 
-				ref := getStringFromMap(repoMap, "ref")
-				// Check if this is a model (contains /) or git repo (contains github.com/.git)
-				if strings.Contains(ref, "github.com") || strings.Contains(ref, "gitlab.com") || strings.Contains(ref, ".git") {
+				// Check for unique fields to determine type
+				if _, hasBranch := repoMap["branch"]; hasBranch {
+					// This is a git repository (has branch field)
 					actualGitRepos = append(actualGitRepos, repo)
-				} else if strings.Contains(ref, "/") {
+				} else if _, hasRevision := repoMap["revision"]; hasRevision {
+					// This is a model (has revision field)
 					models = append(models, repo)
 				} else {
-					actualGitRepos = append(actualGitRepos, repo) // fallback to git repos
+					// Fallback: check ref content for backwards compatibility
+					ref := getStringFromMap(repoMap, "ref")
+					if strings.Contains(ref, "github.com") || strings.Contains(ref, "gitlab.com") || strings.Contains(ref, ".git") {
+						actualGitRepos = append(actualGitRepos, repo)
+					} else {
+						models = append(models, repo)
+					}
 				}
 			}
 
@@ -494,6 +534,23 @@ var cacheRemoveImageCmd = &cobra.Command{
 	},
 }
 
+var cacheRemoveModelCmd = &cobra.Command{
+	Use:   "model <repo-id>",
+	Short: "Remove model from cache plan",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		repoId := args[0]
+		name, _ := cmd.Flags().GetString("name")
+
+		if name == "" {
+			// Generate name from repo ID
+			name = generateModelName(repoId)
+		}
+
+		return removeModelFromCachePlan(repoId, name)
+	},
+}
+
 func init() {
 	// Cache command structure
 	cacheCmd.AddCommand(cachePlanCmd)
@@ -517,6 +574,7 @@ func init() {
 
 	// Remove subcommands
 	cacheRemoveCmd.AddCommand(cacheRemoveImageCmd)
+	cacheRemoveCmd.AddCommand(cacheRemoveModelCmd)
 
 	// Flags
 	cacheAddImageCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
@@ -530,6 +588,7 @@ func init() {
 	cacheUpdateAllCmd.Flags().Bool("force", false, "Force update all repos even with force pushes")
 
 	cacheRemoveImageCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
+	cacheRemoveModelCmd.Flags().String("name", "", "Name for the cache item (auto-generated if not provided)")
 
 	rootCmd.AddCommand(cacheCmd)
 }
@@ -703,6 +762,85 @@ func removeImageFromCachePlan(imageRef, name string) error {
 
 	if !removed {
 		return fmt.Errorf("image %s not found in cache plan", imageRef)
+	}
+
+	// Update the plan
+	spec["items"] = newItems
+	plan.Object["spec"] = spec
+
+	_, err = client.Resource(gvr).Update(ctx, plan, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update cache plan: %w", err)
+	}
+
+	fmt.Printf("✓ Updated cache plan\n")
+	return nil
+}
+
+func removeModelFromCachePlan(repoId, name string) error {
+	ctx := context.Background()
+
+	client, err := getDynamicClient()
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+
+	gvr := schema.GroupVersionResource{
+		Group:    "canhazgpu.dev",
+		Version:  "v1alpha1",
+		Resource: "cacheplans",
+	}
+
+	// Try to get existing plan
+	plan, err := client.Resource(gvr).Get(ctx, "default", metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("cache plan not found: %w", err)
+	}
+
+	// Get items
+	spec, found, err := unstructured.NestedMap(plan.Object, "spec")
+	if err != nil || !found {
+		return fmt.Errorf("cache plan has no spec")
+	}
+
+	items, found, err := unstructured.NestedSlice(spec, "items")
+	if err != nil || !found {
+		return fmt.Errorf("cache plan has no items")
+	}
+
+	// Find and remove the item
+	var newItems []interface{}
+	removed := false
+
+	for _, item := range items {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Check if this is the item to remove (by name or by model repo ID)
+		itemName, _ := itemMap["name"].(string)
+		itemType, _ := itemMap["type"].(string)
+
+		if itemType == "models" {
+			if modelData, ok := itemMap["models"].(map[string]interface{}); ok {
+				if itemRepoId, ok := modelData["repoId"].(string); ok {
+					// Remove if name matches or if repo ID matches
+					if itemName == name || itemRepoId == repoId {
+						fmt.Printf("✓ Removing model %s from cache plan\n", itemRepoId)
+						removed = true
+						continue
+					}
+				}
+			}
+		}
+
+		// Keep this item
+		newItems = append(newItems, item)
+	}
+
+	if !removed {
+		return fmt.Errorf("model %s not found in cache plan", repoId)
 	}
 
 	// Update the plan
