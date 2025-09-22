@@ -32,3 +32,9 @@ k8shazgpu cleanup --name vllm-dev-privileged
 
 vllm serve facebook/opt-125m \
   --gpu-memory-utilization 0.8
+
+
+vllm serve facebook/opt-125m --gpu-memory-utilization 0.8
+
+k8shazgpu vllm run --follow --name vllm-dev-privileged -- vllm serve facebook/opt-125m --gpu-memory-utilization 
+
