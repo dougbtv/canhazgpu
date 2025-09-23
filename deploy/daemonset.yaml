@@ -34,6 +34,9 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        # Set Hugging Face cache directory to our mounted volume
+        - name: HF_HUB_CACHE
+          value: "/var/lib/canhazgpu-cache/hub_cache"
         # Optional Hugging Face token for private model access
         # Create a secret with: kubectl create secret generic hf-token --from-literal=token=your_token_here -n canhazgpu-system
         - name: HF_TOKEN
@@ -79,12 +82,13 @@ spec:
         #   mountPath: /host/etc/containerd
         #   readOnly: true
         resources:
-          limits:
-            cpu: 500m
-            memory: 512Mi
+          # Removed for testing
+          # limits:
+          #   cpu: 500m
+          #   memory: 8Gi
           requests:
-            cpu: 10m
-            memory: 128Mi
+            cpu: 20m
+            memory: 256Mi
       volumes:
       - name: cdi-root
         hostPath:
