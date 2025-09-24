@@ -133,36 +133,12 @@ var cacheListCmd = &cobra.Command{
 
 			images := getArrayFromUnstructured(&item, "status", "images")
 			gitRepos := getArrayFromUnstructured(&item, "status", "gitRepos")
+			models := getArrayFromUnstructured(&item, "status", "models")
 			errors := getArrayFromUnstructured(&item, "status", "errors")
 			lastUpdate := getStringFromUnstructured(&item, "status", "lastUpdate")
 
-			// Separate git repos and models
-			var actualGitRepos []interface{}
-			var models []interface{}
-
-			for _, repo := range gitRepos {
-				repoMap, ok := repo.(map[string]interface{})
-				if !ok {
-					continue
-				}
-
-				// Check for unique fields to determine type
-				if _, hasBranch := repoMap["branch"]; hasBranch {
-					// This is a git repository (has branch field)
-					actualGitRepos = append(actualGitRepos, repo)
-				} else if _, hasRevision := repoMap["revision"]; hasRevision {
-					// This is a model (has revision field)
-					models = append(models, repo)
-				} else {
-					// Fallback: check ref content for backwards compatibility
-					ref := getStringFromMap(repoMap, "ref")
-					if strings.Contains(ref, "github.com") || strings.Contains(ref, "gitlab.com") || strings.Contains(ref, ".git") {
-						actualGitRepos = append(actualGitRepos, repo)
-					} else {
-						models = append(models, repo)
-					}
-				}
-			}
+			// Git repos and models are now separate fields
+			actualGitRepos := gitRepos
 
 			// Format last update time
 			lastUpdateFormatted := "never"
@@ -220,6 +196,7 @@ var cacheStatusCmd = &cobra.Command{
 
 			images := getArrayFromUnstructured(&item, "status", "images")
 			gitRepos := getArrayFromUnstructured(&item, "status", "gitRepos")
+			models := getArrayFromUnstructured(&item, "status", "models")
 			lastUpdate := getStringFromUnstructured(&item, "status", "lastUpdate")
 
 			fmt.Printf("\n=== Node: %s ===\n", nodeName)
@@ -269,33 +246,8 @@ var cacheStatusCmd = &cobra.Command{
 				}
 			}
 
-			// Separate git repos and models
-			var actualGitRepos []interface{}
-			var models []interface{}
-
-			for _, repo := range gitRepos {
-				repoMap, ok := repo.(map[string]interface{})
-				if !ok {
-					continue
-				}
-
-				// Check for unique fields to determine type
-				if _, hasBranch := repoMap["branch"]; hasBranch {
-					// This is a git repository (has branch field)
-					actualGitRepos = append(actualGitRepos, repo)
-				} else if _, hasRevision := repoMap["revision"]; hasRevision {
-					// This is a model (has revision field)
-					models = append(models, repo)
-				} else {
-					// Fallback: check ref content for backwards compatibility
-					ref := getStringFromMap(repoMap, "ref")
-					if strings.Contains(ref, "github.com") || strings.Contains(ref, "gitlab.com") || strings.Contains(ref, ".git") {
-						actualGitRepos = append(actualGitRepos, repo)
-					} else {
-						models = append(models, repo)
-					}
-				}
-			}
+			// Git repositories are now separate from models
+			actualGitRepos := gitRepos
 
 			// Git Repositories section
 			fmt.Printf("\nGit Repositories (%d):\n", len(actualGitRepos))

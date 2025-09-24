@@ -566,6 +566,30 @@ func (r *SimpleCacheReconciler) updateNodeCacheStatus(ctx context.Context, pulle
 		Resource: "nodecachestatuses",
 	}
 
+	// Separate git repos from models
+	var actualGitRepos []map[string]interface{}
+	var models []map[string]interface{}
+
+	for _, item := range clonedRepos {
+		// Check for unique fields to determine type
+		if _, hasBranch := item["branch"]; hasBranch {
+			// This is a git repository (has branch field)
+			actualGitRepos = append(actualGitRepos, item)
+		} else if _, hasRevision := item["revision"]; hasRevision {
+			// This is a model (has revision field)
+			models = append(models, item)
+		} else {
+			// Fallback: check ref content for backwards compatibility
+			if ref, ok := item["ref"].(string); ok {
+				if strings.Contains(ref, "github.com") || strings.Contains(ref, "gitlab.com") || strings.Contains(ref, ".git") {
+					actualGitRepos = append(actualGitRepos, item)
+				} else {
+					models = append(models, item)
+				}
+			}
+		}
+	}
+
 	// Create base resource (without status field)
 	resource := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -591,7 +615,8 @@ func (r *SimpleCacheReconciler) updateNodeCacheStatus(ctx context.Context, pulle
 			"status": map[string]interface{}{
 				"nodeName":   r.nodeName,
 				"images":     pulledImages,
-				"gitRepos":   clonedRepos,
+				"gitRepos":   actualGitRepos,
+				"models":     models,
 				"errors":     errors,
 				"lastUpdate": time.Now().Format(time.RFC3339),
 			},
