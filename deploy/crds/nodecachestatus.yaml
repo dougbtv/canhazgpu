@@ -24,6 +24,8 @@ spec:
                 items:
                   type: object
                   properties:
+                    name:
+                      type: string
                     ref:
                       type: string
                     present:

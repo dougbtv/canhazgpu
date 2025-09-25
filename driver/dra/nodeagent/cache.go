@@ -127,7 +127,7 @@ func (r *SimpleCacheReconciler) processCachePlans(ctx context.Context) ([]map[st
 
 			switch itemType {
 			case "image":
-				r.processImageItem(itemMap, planChanged, &pulledImages, &errors)
+				r.processImageItem(itemMap, planChanged || hasUpdate, &pulledImages, &errors)
 			case "gitRepo":
 				r.processGitRepoItem(itemMap, planChanged || hasUpdate, updateRequest, &clonedRepos, &errors)
 			case "models":
@@ -226,6 +226,18 @@ func (r *SimpleCacheReconciler) checkForUpdateAnnotations(plan *unstructured.Uns
 			}
 
 			klog.Infof("Found update request for repo %s: timestamp=%s, force=%v", repoName, value, force)
+		}
+
+		// Look for image update annotations: canhazgpu.dev/update-image-{name}
+		if strings.HasPrefix(key, "canhazgpu.dev/update-image-") {
+			imageName := strings.TrimPrefix(key, "canhazgpu.dev/update-image-")
+
+			updateRequests[imageName] = UpdateRequest{
+				Timestamp: value,
+				Force:     false, // Images don't use force updates
+			}
+
+			klog.Infof("Found update request for image %s: timestamp=%s", imageName, value)
 		}
 	}
 

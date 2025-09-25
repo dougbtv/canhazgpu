@@ -60,6 +60,11 @@ The Pod will have access to the cached git repository at /workdir and model cach
 			return err
 		}
 
+		skipCacheCheck, err := cmd.Flags().GetBool("skip-cache-check")
+		if err != nil {
+			return err
+		}
+
 		// Generate name if not provided
 		if claimName == "" {
 			claimName = fmt.Sprintf("k8shazgpu-vllm-%d", generateRandomSuffix())
@@ -79,13 +84,31 @@ The Pod will have access to the cached git repository at /workdir and model cach
 			Port:       port,  // Add port mapping
 		}
 
-		// Trigger cache updates for fresh code before creating Pod
-		fmt.Printf("Updating cached git repository %s for fresh code...\n", repoName)
-		if err := updateGitRepoCache(repoName, false); err != nil {
-			fmt.Printf("Warning: Failed to trigger cache update for %s: %v\n", repoName, err)
-			fmt.Printf("Continuing with existing cached version...\n")
+		// Cache validation and warming (unless skipped)
+		if !skipCacheCheck {
+			fmt.Printf("🔍 Checking cache status for required items...\n")
+
+			// First check current cache status
+			err := validateCacheItems(imageName, repoName)
+			if err != nil {
+				fmt.Printf("⚠️  Cache validation failed: %v\n", err)
+				fmt.Printf("🔄 Triggering cache updates to ensure items are ready...\n")
+
+				// Trigger updates for missing/not ready items
+				if err := triggerCacheUpdates(imageName, repoName); err != nil {
+					return fmt.Errorf("failed to trigger cache updates: %w", err)
+				}
+
+				// Wait for cache items to be ready
+				fmt.Printf("⏳ Waiting for cache items to be ready on all nodes (timeout: 5 minutes)...\n")
+				if err := waitForCacheReady(imageName, repoName, 5*time.Minute); err != nil {
+					return fmt.Errorf("cache warming failed: %w", err)
+				}
+			} else {
+				fmt.Printf("✅ All cache items are ready on all nodes\n")
+			}
 		} else {
-			fmt.Printf("✓ Triggered cache update for %s\n", repoName)
+			fmt.Printf("⚠️  Skipping cache validation (--skip-cache-check enabled)\n")
 		}
 
 		fmt.Printf("Creating ResourceClaim %s for vLLM workload requesting %d GPU(s)...\n", claimName, gpus)
@@ -161,6 +184,7 @@ func init() {
 	vllmRunCmd.Flags().String("repo-name", "dougbtv-vllm", "Name of cached git repository to use")
 	vllmRunCmd.Flags().Bool("follow", false, "Follow Pod logs after creation")
 	vllmRunCmd.Flags().Int("port", 8000, "Port to expose for vLLM API server (0 to disable port mapping)")
+	vllmRunCmd.Flags().Bool("skip-cache-check", false, "Skip cache validation and warming before GPU allocation")
 
 	vllmCmd.AddCommand(vllmRunCmd)
 }

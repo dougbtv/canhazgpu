@@ -1190,3 +1190,243 @@ func updateAllCachedResources(force bool) error {
 
 	return nil
 }
+
+// validateCacheItems checks if specified cache items are ready on all nodes
+func validateCacheItems(imageName, repoName string) error {
+	ctx := context.Background()
+
+	client, err := getDynamicClient()
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+
+	// Get all NodeCacheStatus resources
+	gvr := schema.GroupVersionResource{
+		Group:    "canhazgpu.dev",
+		Version:  "v1alpha1",
+		Resource: "nodecachestatuses",
+	}
+
+	list, err := client.Resource(gvr).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list node cache statuses: %w", err)
+	}
+
+	if len(list.Items) == 0 {
+		return fmt.Errorf("no nodes with cache status found")
+	}
+
+	// Check each node for the required cache items
+	var missingNodes []string
+	var notReadyNodes []string
+
+	for _, item := range list.Items {
+		nodeName := item.GetName()
+
+		// Check image if specified
+		if imageName != "" {
+			imageReady := false
+			images := getArrayFromUnstructured(&item, "status", "images")
+			for _, img := range images {
+				imgMap, ok := img.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				// Match by image name or ref
+				ref := getStringFromMap(imgMap, "ref")
+				name := getStringFromMap(imgMap, "name")
+				if name == imageName || strings.Contains(ref, imageName) {
+					status := getStringFromMap(imgMap, "status")
+					present := getBoolFromMap(imgMap, "present")
+					if status == "ready" && present {
+						imageReady = true
+						break
+					} else {
+						notReadyNodes = append(notReadyNodes, fmt.Sprintf("%s (image %s: %s)", nodeName, imageName, status))
+					}
+				}
+			}
+			if !imageReady {
+				missingNodes = append(missingNodes, fmt.Sprintf("%s (missing image %s)", nodeName, imageName))
+			}
+		}
+
+		// Check git repo if specified
+		if repoName != "" {
+			repoReady := false
+			gitRepos := getArrayFromUnstructured(&item, "status", "gitRepos")
+			for _, repo := range gitRepos {
+				repoMap, ok := repo.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				name := getStringFromMap(repoMap, "name")
+				if name == repoName {
+					status := getStringFromMap(repoMap, "status")
+					present := getBoolFromMap(repoMap, "present")
+					if status == "ready" && present {
+						repoReady = true
+						break
+					} else {
+						notReadyNodes = append(notReadyNodes, fmt.Sprintf("%s (repo %s: %s)", nodeName, repoName, status))
+					}
+				}
+			}
+			if !repoReady {
+				missingNodes = append(missingNodes, fmt.Sprintf("%s (missing repo %s)", nodeName, repoName))
+			}
+		}
+	}
+
+	if len(missingNodes) > 0 || len(notReadyNodes) > 0 {
+		errorMsg := "Cache validation failed:\n"
+		if len(missingNodes) > 0 {
+			errorMsg += fmt.Sprintf("  Missing cache items on nodes: %s\n", strings.Join(missingNodes, ", "))
+		}
+		if len(notReadyNodes) > 0 {
+			errorMsg += fmt.Sprintf("  Not ready cache items on nodes: %s\n", strings.Join(notReadyNodes, ", "))
+		}
+		return fmt.Errorf(errorMsg)
+	}
+
+	return nil
+}
+
+// triggerCacheUpdates forces updates for specified cache items
+func triggerCacheUpdates(imageName, repoName string) error {
+	ctx := context.Background()
+
+	client, err := getDynamicClient()
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+
+	// Get cache plan to validate items exist
+	gvr := schema.GroupVersionResource{
+		Group:    "canhazgpu.dev",
+		Version:  "v1alpha1",
+		Resource: "cacheplans",
+	}
+
+	plan, err := client.Resource(gvr).Get(ctx, "default", metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get cache plan: %w", err)
+	}
+
+	// Check if requested items exist in cache plan
+	spec, found, err := unstructured.NestedMap(plan.Object, "spec")
+	if err != nil || !found {
+		return fmt.Errorf("cache plan has no spec")
+	}
+
+	items, found, err := unstructured.NestedSlice(spec, "items")
+	if err != nil || !found {
+		return fmt.Errorf("cache plan has no items")
+	}
+
+	var imageFound, repoFound bool
+	var imageRef string
+
+	for _, item := range items {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		itemType, _ := itemMap["type"].(string)
+		name, _ := itemMap["name"].(string)
+
+		if itemType == "image" && imageName != "" && strings.Contains(name, imageName) {
+			imageFound = true
+			if imgData, ok := itemMap["image"].(map[string]interface{}); ok {
+				imageRef = getStringFromMap(imgData, "ref")
+			}
+		}
+
+		if itemType == "gitRepo" && repoName != "" && name == repoName {
+			repoFound = true
+		}
+	}
+
+	// Validate requested items exist
+	if imageName != "" && !imageFound {
+		return fmt.Errorf("image %s not found in cache plan", imageName)
+	}
+	if repoName != "" && !repoFound {
+		return fmt.Errorf("git repository %s not found in cache plan", repoName)
+	}
+
+	// Trigger git repo update if specified
+	if repoName != "" {
+		fmt.Printf("🔄 Triggering update for git repository: %s\n", repoName)
+		if err := updateGitRepoCache(repoName, false); err != nil {
+			return fmt.Errorf("failed to trigger git repo update: %w", err)
+		}
+	}
+
+	// For images, we trigger update by adding an annotation to the cache plan
+	if imageName != "" && imageRef != "" {
+		fmt.Printf("🔄 Triggering update for image: %s\n", imageName)
+
+		// Retry logic for concurrent modifications
+		for attempts := 0; attempts < 3; attempts++ {
+			// Get fresh copy of the plan
+			freshPlan, err := client.Resource(gvr).Get(ctx, "default", metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to get fresh cache plan: %w", err)
+			}
+
+			annotations, found, err := unstructured.NestedStringMap(freshPlan.Object, "metadata", "annotations")
+			if err != nil || !found {
+				annotations = make(map[string]string)
+			}
+
+			updateKey := fmt.Sprintf("canhazgpu.dev/update-image-%s", imageName)
+			annotations[updateKey] = fmt.Sprintf("%d", time.Now().Unix())
+
+			unstructured.SetNestedStringMap(freshPlan.Object, annotations, "metadata", "annotations")
+
+			_, err = client.Resource(gvr).Update(ctx, freshPlan, metav1.UpdateOptions{})
+			if err == nil {
+				break // Success
+			}
+
+			if attempts == 2 {
+				return fmt.Errorf("failed to update cache plan with image refresh trigger after 3 attempts: %w", err)
+			}
+
+			// Wait briefly before retry
+			time.Sleep(time.Duration(attempts+1) * 100 * time.Millisecond)
+		}
+	}
+
+	return nil
+}
+
+// waitForCacheReady waits for specified cache items to be ready on all nodes
+func waitForCacheReady(imageName, repoName string, timeout time.Duration) error {
+	fmt.Printf("⏳ Waiting for cache items to be ready on all nodes...\n")
+
+	start := time.Now()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			err := validateCacheItems(imageName, repoName)
+			if err == nil {
+				fmt.Printf("✅ All cache items ready on all nodes (took %v)\n", time.Since(start).Truncate(time.Second))
+				return nil
+			}
+
+			elapsed := time.Since(start)
+			if elapsed >= timeout {
+				return fmt.Errorf("timeout waiting for cache items after %v: %v", timeout, err)
+			}
+
+			// Show progress
+			fmt.Printf("⏳ Still waiting for cache items... (elapsed: %v)\n", elapsed.Truncate(time.Second))
+		}
+	}
+}
