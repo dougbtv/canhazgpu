@@ -84,6 +84,46 @@ The Pod will have access to the cached git repository at /workdir and model cach
 			Port:       port,  // Add port mapping
 		}
 
+		// Detect vLLM checkout and auto-configure
+		vllmInfo, err := detectVLLMCheckout()
+		if err != nil {
+			return fmt.Errorf("failed to detect vLLM checkout: %w", err)
+		}
+
+		if vllmInfo.IsVLLMCheckout {
+			fmt.Printf("🔍 vLLM checkout detected!\n")
+			fmt.Print(vllmInfo.Summary())
+
+			// Override defaults with checkout-derived values if not explicitly set
+			if imageName == "vllm-pinned" {
+				// User didn't override, use checkout-derived image
+				checkoutImageName := fmt.Sprintf("vllm-checkout-%s", vllmInfo.MergeBaseCommit[:8])
+				fmt.Printf("📸 Using checkout-derived image: %s\n", checkoutImageName)
+				imageName = checkoutImageName
+			}
+
+			if repoName == "dougbtv-vllm" {
+				// User didn't override, use checkout-derived repo
+				checkoutRepoName := vllmInfo.getCacheRepoName()
+				fmt.Printf("📂 Using checkout-derived repo: %s\n", checkoutRepoName)
+				repoName = checkoutRepoName
+			}
+
+			// Ensure checkout repo and image are in cache plan
+			if err := vllmInfo.ensureInCachePlan(); err != nil {
+				return fmt.Errorf("failed to ensure checkout items in cache plan: %w", err)
+			}
+
+			// Create diff ConfigMap if there are local changes
+			if vllmInfo.HasLocalChanges {
+				fmt.Printf("📦 Packaging %d modified and %d untracked files for transport\n",
+					len(vllmInfo.ModifiedFiles), len(vllmInfo.UntrackedFiles))
+				if err := vllmInfo.createDiffConfigMap(namespace, claimName); err != nil {
+					return fmt.Errorf("failed to create diff ConfigMap: %w", err)
+				}
+			}
+		}
+
 		// Cache validation and warming (unless skipped)
 		if !skipCacheCheck {
 			fmt.Printf("🔍 Checking cache status for required items...\n")
@@ -117,6 +157,13 @@ The Pod will have access to the cached git repository at /workdir and model cach
 		claim, err := client.CreateResourceClaimWithVLLMAnnotations(ctx, req, imageName, repoName, cmdArgs)
 		if err != nil {
 			return fmt.Errorf("failed to create ResourceClaim: %w", err)
+		}
+
+		// Add diff ConfigMap annotation if we have local changes
+		if vllmInfo.IsVLLMCheckout && vllmInfo.HasLocalChanges {
+			diffConfigMapName := getDiffConfigMapName(claimName)
+			claim.Annotations["canhazgpu.dev/diff-configmap"] = diffConfigMapName
+			fmt.Printf("📋 Annotated ResourceClaim with diff ConfigMap: %s\n", diffConfigMapName)
 		}
 
 		fmt.Printf("Waiting for allocation of claim %s...\n", claim.Name)

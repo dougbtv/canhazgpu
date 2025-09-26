@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -312,6 +313,13 @@ func (r *SimpleCacheReconciler) processGitRepoItem(itemMap map[string]interface{
 		*errors = append(*errors, fmt.Sprintf("Failed to clone git repo %s (branch: %s): %v", gitURL, branch, err))
 	} else {
 		klog.Infof("Successfully cloned git repo %s (branch: %s)", gitURL, branch)
+
+		// Check for and apply vLLM diffs if this is a vLLM repository
+		repoDir := fmt.Sprintf("/var/lib/canhazgpu-cache/%s", pathName)
+		if r.isVLLMRepository(repoDir) {
+			r.applyVLLMDiffsIfAvailable(repoDir, name)
+		}
+
 		repoStatus["status"] = "ready"
 		repoStatus["present"] = true
 		repoStatus["message"] = fmt.Sprintf("Clone completed successfully (branch: %s)", branch)
@@ -666,4 +674,91 @@ func (r *SimpleCacheReconciler) updateNodeCacheStatus(ctx context.Context, pulle
 	}
 
 	return nil
+}
+
+// isVLLMRepository checks if a directory contains a vLLM repository
+func (r *SimpleCacheReconciler) isVLLMRepository(repoDir string) bool {
+	// Check for vLLM-specific indicators
+	vllmIndicators := []string{
+		"vllm",           // vllm package directory
+		"setup.py",       // Python setup file
+		"pyproject.toml", // Modern Python project file
+	}
+
+	for _, indicator := range vllmIndicators {
+		if _, err := os.Stat(filepath.Join(repoDir, indicator)); err == nil {
+			// Additional check for vLLM-specific content
+			if indicator == "vllm" {
+				// Check if vllm directory contains __init__.py
+				if _, err := os.Stat(filepath.Join(repoDir, "vllm", "__init__.py")); err == nil {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// applyVLLMDiffsIfAvailable looks for and applies vLLM diffs for active ResourceClaims
+func (r *SimpleCacheReconciler) applyVLLMDiffsIfAvailable(repoDir, repoName string) {
+	// Check if diffs have already been applied
+	if isVLLMDiffApplied(repoDir) {
+		klog.V(4).Infof("vLLM diffs already applied to %s", repoDir)
+		return
+	}
+
+	// Look for active ResourceClaims that reference this repo and have diff ConfigMaps
+	diffConfigMaps := r.findDiffConfigMapsForRepo(repoName)
+
+	for _, configMapPath := range diffConfigMaps {
+		klog.Infof("Applying vLLM diffs from %s to %s", configMapPath, repoDir)
+		if err := applyVLLMDiffs(repoDir, configMapPath); err != nil {
+			klog.Errorf("Failed to apply vLLM diffs from %s: %v", configMapPath, err)
+			continue
+		}
+
+		// Mark diffs as applied to avoid reapplication
+		if err := markVLLMDiffApplied(repoDir); err != nil {
+			klog.Warningf("Failed to mark diffs as applied: %v", err)
+		}
+
+		break // Apply only the first valid diff ConfigMap
+	}
+}
+
+// findDiffConfigMapsForRepo finds mounted diff ConfigMaps for the given repo
+func (r *SimpleCacheReconciler) findDiffConfigMapsForRepo(repoName string) []string {
+	var configMapPaths []string
+
+	// Check common mount paths where diff ConfigMaps might be mounted
+	// This assumes the controller mounts them at predictable paths
+	diffBasePath := "/var/lib/canhazgpu-diffs"
+
+	// Look for directories that match the pattern
+	if entries, err := os.ReadDir(diffBasePath); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				configMapPath := filepath.Join(diffBasePath, entry.Name())
+				// Check if this ConfigMap is for our repo by checking metadata
+				if r.isConfigMapForRepo(configMapPath, repoName) {
+					configMapPaths = append(configMapPaths, configMapPath)
+				}
+			}
+		}
+	}
+
+	return configMapPaths
+}
+
+// isConfigMapForRepo checks if a ConfigMap directory contains diffs for the specified repo
+func (r *SimpleCacheReconciler) isConfigMapForRepo(configMapPath, repoName string) bool {
+	// Check if checkout_info exists and contains our repo name
+	checkoutInfoPath := filepath.Join(configMapPath, "checkout_info")
+	if data, err := os.ReadFile(checkoutInfoPath); err == nil {
+		// Simple string matching - in production might want to parse JSON properly
+		return strings.Contains(string(data), repoName)
+	}
+
+	return false
 }
