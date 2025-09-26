@@ -440,6 +440,7 @@ func (r *ResourceClaimController) createVLLMPod(ctx context.Context, claim *reso
 	repoName := claim.Annotations["canhazgpu.dev/repo-name"]
 	cmdStr := claim.Annotations["canhazgpu.dev/cmd"]
 	portStr := claim.Annotations["canhazgpu.dev/port"]
+	diffConfigMap := claim.Annotations["canhazgpu.dev/diff-configmap"]
 
 	if imageName == "" || repoName == "" || cmdStr == "" {
 		return nil, fmt.Errorf("missing required vLLM annotations: image-name=%s, repo-name=%s, cmd=%s",
@@ -476,6 +477,44 @@ func (r *ResourceClaimController) createVLLMPod(ctx context.Context, claim *reso
 	// Properly escape the user command for shell execution
 	escapedUserCmd := strings.ReplaceAll(userCmd, "'", "'\"'\"'")
 
+	// Add diff application to wrapper script if ConfigMap is available
+	diffApplicationScript := ""
+	if diffConfigMap != "" {
+		diffApplicationScript = fmt.Sprintf(`
+# Apply local diffs if available
+if [ -d "/var/lib/canhazgpu-diffs/%s" ]; then
+    echo "Applying local diffs from ConfigMap..."
+
+    # Check for diff patch
+    if [ -f "/var/lib/canhazgpu-diffs/%s/diff.patch" ] && [ -s "/var/lib/canhazgpu-diffs/%s/diff.patch" ]; then
+        echo "Applying git patch..."
+        cd /vllm-workspace
+        git apply --ignore-whitespace "/var/lib/canhazgpu-diffs/%s/diff.patch" || echo "Git patch application failed (may be expected)"
+    fi
+
+    # Restore untracked files
+    if [ -f "/var/lib/canhazgpu-diffs/%s/untracked_files" ] && [ -s "/var/lib/canhazgpu-diffs/%s/untracked_files" ]; then
+        echo "Restoring untracked files..."
+        cd /vllm-workspace
+        while IFS= read -r filename; do
+            if [ -n "$filename" ]; then
+                echo "Restoring untracked file: $filename"
+                # Extract file content from diff data (simple approach for now)
+                # In production, this would be more sophisticated
+                if grep -q "# New file: $filename" "/var/lib/canhazgpu-diffs/%s/diff.patch" 2>/dev/null; then
+                    # Extract content between markers
+                    awk "/# New file: $filename\$/{flag=1; next} /^# /{flag=0} flag" "/var/lib/canhazgpu-diffs/%s/diff.patch" > "$filename"
+                    echo "Created untracked file: $filename"
+                fi
+            fi
+        done < "/var/lib/canhazgpu-diffs/%s/untracked_files"
+    fi
+
+    echo "Diff application completed."
+fi
+`, diffConfigMap, diffConfigMap, diffConfigMap, diffConfigMap, diffConfigMap, diffConfigMap, diffConfigMap, diffConfigMap, diffConfigMap)
+	}
+
 	wrapperScript := fmt.Sprintf(`
 # vLLM workspace setup (replicating CI pattern)
 echo "Setting up vLLM workspace..."
@@ -483,7 +522,7 @@ echo "Setting up vLLM workspace..."
 # Copy in the code from the checkout to the workspace
 rm -rf /vllm-workspace/vllm || true
 cp -a /workdir/. /vllm-workspace/
-
+%s
 # Overlay the pure-Python vllm into the install package dir
 export SITEPKG="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 cp -a /vllm-workspace/vllm/* "$SITEPKG/vllm/"
@@ -498,7 +537,7 @@ cd /vllm-workspace
 
 # Now exec the user command (properly escaped)
 exec sh -c '%s'
-`, escapedUserCmd)
+`, diffApplicationScript, escapedUserCmd)
 
 	cmdArgs := []string{"/bin/sh", "-c", wrapperScript}
 
@@ -594,6 +633,34 @@ exec sh -c '%s'
 		{
 			Name: "gpu-claim",
 		},
+	}
+
+	// Mount diff ConfigMap if available
+	if diffConfigMap != "" {
+		// Add diff ConfigMap volume to pod
+		diffVolume := corev1.Volume{
+			Name: "diff-configmap",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: diffConfigMap,
+					},
+				},
+			},
+		}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, diffVolume)
+
+		// Add diff ConfigMap mount to container
+		diffVolumeMount := corev1.VolumeMount{
+			Name:      "diff-configmap",
+			MountPath: fmt.Sprintf("/var/lib/canhazgpu-diffs/%s", diffConfigMap),
+			ReadOnly:  true,
+		}
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, diffVolumeMount)
+
+		logger.Info("mounted diff ConfigMap into vLLM Pod",
+			"configMap", diffConfigMap,
+			"mountPath", fmt.Sprintf("/var/lib/canhazgpu-diffs/%s", diffConfigMap))
 	}
 
 	logger.Info("creating vLLM Pod",

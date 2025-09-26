@@ -27,7 +27,6 @@ func applyVLLMDiffs(repoDir, configMapPath string) error {
 
 	// Read diff data
 	diffPatchPath := filepath.Join(configMapPath, "diff.patch")
-	modifiedFilesPath := filepath.Join(configMapPath, "modified_files")
 	untrackedFilesPath := filepath.Join(configMapPath, "untracked_files")
 
 	// Apply git patch for modified files

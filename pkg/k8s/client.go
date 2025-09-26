@@ -111,7 +111,7 @@ func (c *Client) CreateResourceClaimWithPodSpec(ctx context.Context, req *Reserv
 	return c.resourceClient.ResourceClaims(c.namespace).Create(ctx, claim, metav1.CreateOptions{})
 }
 
-func (c *Client) CreateResourceClaimWithVLLMAnnotations(ctx context.Context, req *ReservationRequest, imageName, repoName string, cmdArgs []string) (*resourceapi.ResourceClaim, error) {
+func (c *Client) CreateResourceClaimWithVLLMAnnotations(ctx context.Context, req *ReservationRequest, imageName, repoName string, cmdArgs []string, diffConfigMap string) (*resourceapi.ResourceClaim, error) {
 	// Create ResourceClaimSpec for v1beta1 API
 	spec := resourceapi.ResourceClaimSpec{
 		Devices: resourceapi.DeviceClaim{
@@ -142,6 +142,11 @@ func (c *Client) CreateResourceClaimWithVLLMAnnotations(ctx context.Context, req
 	// Add port annotation if specified
 	if req.Port > 0 {
 		annotations["canhazgpu.dev/port"] = fmt.Sprintf("%d", req.Port)
+	}
+
+	// Add diff ConfigMap annotation if specified
+	if diffConfigMap != "" {
+		annotations["canhazgpu.dev/diff-configmap"] = diffConfigMap
 	}
 
 	claim := &resourceapi.ResourceClaim{
@@ -391,6 +396,11 @@ func (c *Client) DeleteResourceClaim(ctx context.Context, claimName string) erro
 	_ = c.clientset.CoreV1().ConfigMaps(c.namespace).Delete(ctx, claimName+"-params", metav1.DeleteOptions{})
 
 	return c.resourceClient.ResourceClaims(c.namespace).Delete(ctx, claimName, metav1.DeleteOptions{})
+}
+
+func (c *Client) UpdateResourceClaim(ctx context.Context, claim *resourceapi.ResourceClaim) error {
+	_, err := c.resourceClient.ResourceClaims(c.namespace).Update(ctx, claim, metav1.UpdateOptions{})
+	return err
 }
 
 func (c *Client) DeletePod(ctx context.Context, podName string) error {

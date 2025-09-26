@@ -153,17 +153,17 @@ The Pod will have access to the cached git repository at /workdir and model cach
 
 		fmt.Printf("Creating ResourceClaim %s for vLLM workload requesting %d GPU(s)...\n", claimName, gpus)
 
-		// Create ResourceClaim with vLLM-specific annotations
-		claim, err := client.CreateResourceClaimWithVLLMAnnotations(ctx, req, imageName, repoName, cmdArgs)
-		if err != nil {
-			return fmt.Errorf("failed to create ResourceClaim: %w", err)
+		// Include diff ConfigMap annotation if we have local changes
+		var diffConfigMapName string
+		if vllmInfo.IsVLLMCheckout && vllmInfo.HasLocalChanges {
+			diffConfigMapName = getDiffConfigMapName(claimName)
+			fmt.Printf("📋 Will annotate ResourceClaim with diff ConfigMap: %s\n", diffConfigMapName)
 		}
 
-		// Add diff ConfigMap annotation if we have local changes
-		if vllmInfo.IsVLLMCheckout && vllmInfo.HasLocalChanges {
-			diffConfigMapName := getDiffConfigMapName(claimName)
-			claim.Annotations["canhazgpu.dev/diff-configmap"] = diffConfigMapName
-			fmt.Printf("📋 Annotated ResourceClaim with diff ConfigMap: %s\n", diffConfigMapName)
+		// Create ResourceClaim with vLLM-specific annotations
+		claim, err := client.CreateResourceClaimWithVLLMAnnotations(ctx, req, imageName, repoName, cmdArgs, diffConfigMapName)
+		if err != nil {
+			return fmt.Errorf("failed to create ResourceClaim: %w", err)
 		}
 
 		fmt.Printf("Waiting for allocation of claim %s...\n", claim.Name)
