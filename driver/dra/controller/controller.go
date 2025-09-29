@@ -516,6 +516,9 @@ fi
 	}
 
 	wrapperScript := fmt.Sprintf(`
+# Set up signal handling for faster pod termination
+trap 'echo "Received termination signal, shutting down..."; kill %%1 2>/dev/null; exit 0' TERM INT
+
 # vLLM workspace setup (replicating CI pattern)
 echo "Setting up vLLM workspace..."
 
@@ -535,8 +538,9 @@ mv /vllm-workspace/vllm /vllm-workspace/src/vllm
 echo "vLLM workspace setup complete. Running user command..."
 cd /vllm-workspace
 
-# Now exec the user command (properly escaped)
-exec sh -c '%s'
+# Run user command in background and wait for it to complete
+sh -c '%s' &
+wait $!
 `, diffApplicationScript, escapedUserCmd)
 
 	cmdArgs := []string{"/bin/sh", "-c", wrapperScript}
