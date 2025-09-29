@@ -73,6 +73,15 @@ func cleanupClaim(ctx context.Context, client *k8s.Client, claimName string) err
 		}
 	}
 
+	// Delete diff ConfigMap if it exists (for vLLM checkouts)
+	diffConfigMapName := fmt.Sprintf("%s-vllm-diffs", claimName)
+	if err := client.DeleteConfigMap(ctx, diffConfigMapName); err != nil {
+		// Don't error if ConfigMap doesn't exist - it's optional
+		fmt.Printf("Note: diff ConfigMap %s not found (expected for non-vLLM workloads)\n", diffConfigMapName)
+	} else {
+		fmt.Printf("✓ Diff ConfigMap %s deleted\n", diffConfigMapName)
+	}
+
 	// Delete ResourceClaim
 	if err := client.DeleteResourceClaim(ctx, claimName); err != nil {
 		return fmt.Errorf("failed to delete ResourceClaim %s: %w", claimName, err)

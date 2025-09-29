@@ -407,6 +407,10 @@ func (c *Client) DeletePod(ctx context.Context, podName string) error {
 	return c.clientset.CoreV1().Pods(c.namespace).Delete(ctx, podName, metav1.DeleteOptions{})
 }
 
+func (c *Client) DeleteConfigMap(ctx context.Context, configMapName string) error {
+	return c.clientset.CoreV1().ConfigMaps(c.namespace).Delete(ctx, configMapName, metav1.DeleteOptions{})
+}
+
 func (c *Client) CreatePodsForAllocatedClaims(ctx context.Context) error {
 	// Find allocated ResourceClaims that don't have associated Pods yet
 	claims, err := c.resourceClient.ResourceClaims(c.namespace).List(ctx, metav1.ListOptions{})
