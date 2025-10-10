@@ -8,6 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"github.com/russellb/canhazgpu/pkg/k8s"
 )
 
@@ -90,6 +92,10 @@ The Pod will have access to the cached git repository at /workdir and model cach
 			return fmt.Errorf("failed to detect vLLM checkout: %w", err)
 		}
 
+		// Track if we created a diff ConfigMap so we can clean it up on error
+		var createdDiffConfigMap bool
+		var diffConfigMapNameForCleanup string
+
 		if vllmInfo.IsVLLMCheckout {
 			fmt.Printf("🔍 vLLM checkout detected!\n")
 			fmt.Print(vllmInfo.Summary())
@@ -121,6 +127,8 @@ The Pod will have access to the cached git repository at /workdir and model cach
 				if err := vllmInfo.createDiffConfigMap(namespace, claimName); err != nil {
 					return fmt.Errorf("failed to create diff ConfigMap: %w", err)
 				}
+				createdDiffConfigMap = true
+				diffConfigMapNameForCleanup = getDiffConfigMapName(claimName)
 			}
 		}
 
@@ -136,12 +144,20 @@ The Pod will have access to the cached git repository at /workdir and model cach
 
 				// Trigger updates for missing/not ready items
 				if err := triggerCacheUpdates(imageName, repoName); err != nil {
+					// Clean up diff ConfigMap before returning error
+					if createdDiffConfigMap && diffConfigMapNameForCleanup != "" {
+						cleanupDiffConfigMap(namespace, diffConfigMapNameForCleanup)
+					}
 					return fmt.Errorf("failed to trigger cache updates: %w", err)
 				}
 
 				// Wait for cache items to be ready
 				fmt.Printf("⏳ Waiting for cache items to be ready on all nodes (timeout: 5 minutes)...\n")
 				if err := waitForCacheReady(imageName, repoName, 5*time.Minute); err != nil {
+					// Clean up diff ConfigMap before returning error
+					if createdDiffConfigMap && diffConfigMapNameForCleanup != "" {
+						cleanupDiffConfigMap(namespace, diffConfigMapNameForCleanup)
+					}
 					return fmt.Errorf("cache warming failed: %w", err)
 				}
 			} else {
@@ -220,6 +236,31 @@ The Pod will have access to the cached git repository at /workdir and model cach
 
 		return nil
 	},
+}
+
+// cleanupDiffConfigMap deletes a diff ConfigMap, typically when the vllm run command fails
+func cleanupDiffConfigMap(namespace, configMapName string) {
+	ctx := context.Background()
+
+	client, err := getDynamicClient()
+	if err != nil {
+		fmt.Printf("⚠️  Warning: Failed to create client for ConfigMap cleanup: %v\n", err)
+		return
+	}
+
+	gvr := schema.GroupVersionResource{
+		Group:    "",
+		Version:  "v1",
+		Resource: "configmaps",
+	}
+
+	err = client.Resource(gvr).Namespace(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{})
+	if err != nil {
+		fmt.Printf("⚠️  Warning: Failed to clean up diff ConfigMap %s: %v\n", configMapName, err)
+		fmt.Printf("💡 You can manually delete it with: kubectl delete configmap %s -n %s\n", configMapName, namespace)
+	} else {
+		fmt.Printf("🗑️  Cleaned up diff ConfigMap %s\n", configMapName)
+	}
 }
 
 func init() {

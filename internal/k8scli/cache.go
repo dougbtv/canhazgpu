@@ -1403,6 +1403,90 @@ func triggerCacheUpdates(imageName, repoName string) error {
 	return nil
 }
 
+// checkForFailedImagePull checks if an image pull has failed and returns a helpful error message
+func checkForFailedImagePull(imageName string) error {
+	ctx := context.Background()
+
+	client, err := getDynamicClient()
+	if err != nil {
+		return nil // Don't fail on client errors, let the timeout handle it
+	}
+
+	gvr := schema.GroupVersionResource{
+		Group:    "canhazgpu.dev",
+		Version:  "v1alpha1",
+		Resource: "nodecachestatuses",
+	}
+
+	list, err := client.Resource(gvr).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil // Don't fail on listing errors, let the timeout handle it
+	}
+
+	// Check if any node has a failed status for this image
+	for _, item := range list.Items {
+		images := getArrayFromUnstructured(&item, "status", "images")
+		for _, img := range images {
+			imgMap, ok := img.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			// Match by image name or ref
+			ref := getStringFromMap(imgMap, "ref")
+			name := getStringFromMap(imgMap, "name")
+			if name == imageName || strings.Contains(ref, imageName) {
+				status := getStringFromMap(imgMap, "status")
+				message := getStringFromMap(imgMap, "message")
+
+				// If we detect a failed status, provide helpful guidance
+				if status == "failed" {
+					// Check if the failure is due to manifest not found (non-existent image)
+					if strings.Contains(message, "manifest unknown") ||
+					   strings.Contains(message, "not found") ||
+					   strings.Contains(message, "Requested image not found") {
+						return fmt.Errorf(`❌ Image pull failed: The Docker image does not exist in the registry.
+
+Image: %s
+Error: %s
+
+This typically happens when the merge-base commit doesn't have a corresponding CI-built image.
+
+📋 To fix this issue, you have two options:
+
+1. Rebase your branch on the latest upstream/main:
+   cd /tmp/vllm
+   git fetch upstream
+   git rebase upstream/main
+
+2. Specify an existing image manually:
+   k8shazgpu vllm run --image-name <existing-image> --name <your-name> -- <your-command>
+
+💡 Don't forget to clean up the failed cache plan item:
+   k8shazgpu cache remove image %s
+
+   Or view cache status to see all items:
+   k8shazgpu cache status`, ref, message, ref)
+					}
+
+					// Generic failure message for other types of failures
+					return fmt.Errorf(`❌ Image pull failed: %s
+
+Image: %s
+
+💡 To clean up the failed cache plan item:
+   k8shazgpu cache remove image %s
+
+   Or view cache status:
+   k8shazgpu cache status`, message, ref, ref)
+				}
+			}
+		}
+	}
+
+	return nil // No failed status detected
+}
+
 // waitForCacheReady waits for specified cache items to be ready on all nodes
 func waitForCacheReady(imageName, repoName string, timeout time.Duration) error {
 	fmt.Printf("⏳ Waiting for cache items to be ready on all nodes...\n")
@@ -1418,6 +1502,14 @@ func waitForCacheReady(imageName, repoName string, timeout time.Duration) error 
 			if err == nil {
 				fmt.Printf("✅ All cache items ready on all nodes (took %v)\n", time.Since(start).Truncate(time.Second))
 				return nil
+			}
+
+			// Check if image pull has failed (not just missing/not ready)
+			if imageName != "" {
+				failedErr := checkForFailedImagePull(imageName)
+				if failedErr != nil {
+					return failedErr
+				}
 			}
 
 			elapsed := time.Since(start)

@@ -459,6 +459,19 @@ func (info *VLLMCheckoutInfo) createDiffConfigMap(namespace, claimName string) e
 
 	configMapName := fmt.Sprintf("%s-vllm-diffs", claimName)
 
+	// Check if ConfigMap already exists and delete it
+	_, err = client.Resource(gvr).Namespace(namespace).Get(ctx, configMapName, metav1.GetOptions{})
+	if err == nil {
+		// ConfigMap exists, delete it first
+		fmt.Printf("🗑️  Deleting existing ConfigMap %s\n", configMapName)
+		err = client.Resource(gvr).Namespace(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to delete existing diff ConfigMap: %w", err)
+		}
+	}
+	// If error is NotFound, that's fine - we'll create a new one
+	// For other errors, we'll try to create anyway and let it fail if needed
+
 	// Create ConfigMap with diff data
 	configMap := &unstructured.Unstructured{
 		Object: map[string]interface{}{
