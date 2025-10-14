@@ -11,10 +11,10 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	resourceapi "k8s.io/api/resource/v1beta1"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -117,10 +117,10 @@ func (r *ResourceClaimController) allocateResources(ctx context.Context, claim *
 
 	// Request allocation from node agent
 	allocReq := &api.AllocationRequest{
-		ClaimUID:   string(claim.UID),
-		GPUCount:   params.GPUCount,
-		GPUIDs:     params.GPUIDs,
-		Namespace:  claim.Namespace,
+		ClaimUID:  string(claim.UID),
+		GPUCount:  params.GPUCount,
+		GPUIDs:    params.GPUIDs,
+		Namespace: claim.Namespace,
 	}
 
 	allocResp, err := r.requestAllocationFromNode(ctx, node.Name, allocReq)
@@ -185,7 +185,10 @@ func (r *ResourceClaimController) parseClaimParameters(ctx context.Context, clai
 
 	// For Phase 1, extract GPU count from device requests
 	if len(claim.Spec.Devices.Requests) > 0 {
-		params.GPUCount = int(claim.Spec.Devices.Requests[0].Count)
+		req := claim.Spec.Devices.Requests[0]
+		if req.Exactly != nil {
+			params.GPUCount = int(req.Exactly.Count)
+		}
 	}
 
 	// TODO: Add support for specific GPU IDs and node preferences in Phase 2
@@ -403,7 +406,7 @@ func (r *ResourceClaimController) AutoReconcilePods(ctx context.Context) error {
 					},
 					ResourceClaims: []corev1.PodResourceClaim{
 						{
-							Name: "gpu-claim",
+							Name:              "gpu-claim",
 							ResourceClaimName: &claim.Name,
 						},
 					},
@@ -625,7 +628,7 @@ wait $!
 			},
 			ResourceClaims: []corev1.PodResourceClaim{
 				{
-					Name: "gpu-claim",
+					Name:              "gpu-claim",
 					ResourceClaimName: &claim.Name,
 				},
 			},

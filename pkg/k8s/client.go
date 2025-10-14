@@ -12,14 +12,14 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	resourceapi "k8s.io/api/resource/v1beta1"
+	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+	resourceclient "k8s.io/client-go/kubernetes/typed/resource/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	resourceclient "k8s.io/client-go/kubernetes/typed/resource/v1beta1"
 )
 
 const (
@@ -29,7 +29,7 @@ const (
 
 type Client struct {
 	clientset      kubernetes.Interface
-	resourceClient resourceclient.ResourceV1beta1Interface
+	resourceClient resourceclient.ResourceV1Interface
 	namespace      string
 }
 
@@ -73,15 +73,17 @@ func (c *Client) CreateResourceClaim(ctx context.Context, req *ReservationReques
 }
 
 func (c *Client) CreateResourceClaimWithPodSpec(ctx context.Context, req *ReservationRequest, podSpec *PodSpec) (*resourceapi.ResourceClaim, error) {
-	// Create ResourceClaimSpec for v1beta1 API
+	// Create ResourceClaimSpec for v1 API
 	spec := resourceapi.ResourceClaimSpec{
 		Devices: resourceapi.DeviceClaim{
 			Requests: []resourceapi.DeviceRequest{
 				{
-					Name:            "gpu-request",
-					DeviceClassName: DeviceClassName,
-					AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
-					Count:           int64(req.GPUCount),
+					Name: "gpu-request",
+					Exactly: &resourceapi.ExactDeviceRequest{
+						DeviceClassName: DeviceClassName,
+						AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+						Count:           int64(req.GPUCount),
+					},
 				},
 			},
 		},
@@ -112,15 +114,17 @@ func (c *Client) CreateResourceClaimWithPodSpec(ctx context.Context, req *Reserv
 }
 
 func (c *Client) CreateResourceClaimWithVLLMAnnotations(ctx context.Context, req *ReservationRequest, imageName, repoName string, cmdArgs []string, diffConfigMap string) (*resourceapi.ResourceClaim, error) {
-	// Create ResourceClaimSpec for v1beta1 API
+	// Create ResourceClaimSpec for v1 API
 	spec := resourceapi.ResourceClaimSpec{
 		Devices: resourceapi.DeviceClaim{
 			Requests: []resourceapi.DeviceRequest{
 				{
-					Name:            "gpu-request",
-					DeviceClassName: DeviceClassName,
-					AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
-					Count:           int64(req.GPUCount),
+					Name: "gpu-request",
+					Exactly: &resourceapi.ExactDeviceRequest{
+						DeviceClassName: DeviceClassName,
+						AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+						Count:           int64(req.GPUCount),
+					},
 				},
 			},
 		},
@@ -255,7 +259,7 @@ func (c *Client) CreatePod(ctx context.Context, req *PodRequest) (*corev1.Pod, e
 			},
 			ResourceClaims: []corev1.PodResourceClaim{
 				{
-					Name: "gpu-claim",
+					Name:              "gpu-claim",
 					ResourceClaimName: &req.ClaimName,
 				},
 			},
@@ -558,7 +562,7 @@ func (c *Client) getGPUSummaryFromClaims(ctx context.Context) (*GPUSummary, erro
 		if ready {
 			nodeInfo := &NodeGPUInfo{
 				NodeName:      node.Name,
-				TotalGPUs:     1, // Hardcoded for now - should be configurable
+				TotalGPUs:     1,        // Hardcoded for now - should be configurable
 				AvailableGPUs: []int{0}, // Start with GPU 0 available
 				AllocatedGPUs: []AllocatedGPUInfo{},
 			}
