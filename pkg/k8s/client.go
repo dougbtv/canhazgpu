@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -681,4 +682,70 @@ func (c *Client) getNodeGPUInfoByIP(ctx context.Context, nodeName, nodeIP string
 	}
 
 	return nodeInfo, nil
+}
+
+// GetPodLogs retrieves logs from a pod (non-streaming)
+func (c *Client) GetPodLogs(ctx context.Context, podName string, follow bool) error {
+	req := c.clientset.CoreV1().Pods(c.namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Follow: follow,
+	})
+
+	podLogs, err := req.Stream(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get logs: %w", err)
+	}
+	defer podLogs.Close()
+
+	// Stream logs to stdout
+	_, err = io.Copy(os.Stdout, podLogs)
+	if err != nil {
+		return fmt.Errorf("failed to copy logs to stdout: %w", err)
+	}
+
+	return nil
+}
+
+// GetPodCreationTime returns the creation timestamp of a pod
+func (c *Client) GetPodCreationTime(ctx context.Context, podName string) (time.Time, error) {
+	pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to get pod: %w", err)
+	}
+
+	return pod.CreationTimestamp.Time, nil
+}
+
+// ExecInPod executes an interactive command in a pod
+func (c *Client) ExecInPod(ctx context.Context, podName, shell string) error {
+	// Get the pod to find the container name
+	pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get pod: %w", err)
+	}
+
+	if len(pod.Spec.Containers) == 0 {
+		return fmt.Errorf("pod has no containers")
+	}
+
+	containerName := pod.Spec.Containers[0].Name
+
+	// Use kubectl exec for interactive session
+	// This is simpler than using the client-go exec API which requires TTY setup
+	kubectlArgs := []string{
+		"exec",
+		"-it",
+		podName,
+		"-n", c.namespace,
+		"-c", containerName,
+		"--",
+		shell,
+	}
+
+	// Execute kubectl
+	cmd := exec.Command("kubectl", kubectlArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
 }

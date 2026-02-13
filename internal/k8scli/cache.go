@@ -206,9 +206,10 @@ var cacheStatusCmd = &cobra.Command{
 			if len(images) == 0 {
 				fmt.Println("  No images")
 			} else {
-				fmt.Printf("%-8s %-50s %-10s %s\n", "STATUS", "IMAGE", "PRESENT", "MESSAGE")
-				fmt.Println("-------------------------------------------------------------------------------------")
+				fmt.Printf("%-8s %-30s %-30s %-10s %s\n", "STATUS", "NAME", "IMAGE", "PRESENT", "MESSAGE")
+				fmt.Println("----------------------------------------------------------------------------------------------------------")
 
+				var failedImages []string
 				for _, img := range images {
 					imgMap, ok := img.(map[string]interface{})
 					if !ok {
@@ -216,6 +217,7 @@ var cacheStatusCmd = &cobra.Command{
 					}
 
 					ref := getStringFromMap(imgMap, "ref")
+					name := getStringFromMap(imgMap, "name")
 					status := getStringFromMap(imgMap, "status")
 					present := getBoolFromMap(imgMap, "present")
 					message := getStringFromMap(imgMap, "message")
@@ -234,15 +236,26 @@ var cacheStatusCmd = &cobra.Command{
 						statusIcon = "✅"
 					case "failed":
 						statusIcon = "❌"
+						failedImages = append(failedImages, name)
 					default:
 						statusIcon = "❓"
 					}
 
-					fmt.Printf("%-8s %-50s %-10s %s\n",
+					fmt.Printf("%-8s %-30s %-30s %-10s %s\n",
 						statusIcon+" "+status,
-						truncateString(ref, 48),
+						truncateString(name, 28),
+						truncateMiddle(ref, 28),
 						presentStr,
-						truncateString(message, 40))
+						truncateString(message, 30))
+				}
+
+				// Show cleanup hints for failed images
+				if len(failedImages) > 0 {
+					fmt.Println()
+					fmt.Println("💡 To clean up failed images:")
+					for _, name := range failedImages {
+						fmt.Printf("   k8shazgpu cache remove image %s\n", name)
+					}
 				}
 			}
 
@@ -844,6 +857,30 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// truncateMiddle truncates a string by removing characters from the middle,
+// preserving the beginning and end. This is useful for image refs where the
+// end contains important commit hashes.
+func truncateMiddle(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+
+	// Reserve 3 characters for "..."
+	if maxLen < 10 {
+		// If maxLen is too small, fall back to regular truncation
+		return truncateString(s, maxLen)
+	}
+
+	// Calculate how many chars to keep from start and end
+	// We want to show more from the end (where the commit hash is)
+	// So we'll use 40% for start, 60% for end
+	remainingChars := maxLen - 3 // Reserve 3 for "..."
+	startChars := remainingChars * 2 / 5    // 40%
+	endChars := remainingChars - startChars // 60%
+
+	return s[:startChars] + "..." + s[len(s)-endChars:]
 }
 
 func generateGitRepoName(gitURL string) string {
@@ -1448,6 +1485,7 @@ func checkForFailedImagePull(imageName string) error {
 						return fmt.Errorf(`❌ Image pull failed: The Docker image does not exist in the registry.
 
 Image: %s
+Name: %s
 Error: %s
 
 This typically happens when the merge-base commit doesn't have a corresponding CI-built image.
@@ -1466,19 +1504,20 @@ This typically happens when the merge-base commit doesn't have a corresponding C
    k8shazgpu cache remove image %s
 
    Or view cache status to see all items:
-   k8shazgpu cache status`, ref, message, ref)
+   k8shazgpu cache status`, ref, name, message, name)
 					}
 
 					// Generic failure message for other types of failures
 					return fmt.Errorf(`❌ Image pull failed: %s
 
 Image: %s
+Name: %s
 
 💡 To clean up the failed cache plan item:
-   k8shazgpu cache remove image %s
+   k8shazgpu cache remove image --name %s
 
    Or view cache status:
-   k8shazgpu cache status`, message, ref, ref)
+   k8shazgpu cache status`, message, ref, name, name)
 				}
 			}
 		}
