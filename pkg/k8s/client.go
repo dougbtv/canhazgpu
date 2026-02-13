@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -650,30 +649,40 @@ func (c *Client) getGPUSummaryFromClaims(ctx context.Context) (*GPUSummary, erro
 }
 
 func (c *Client) getNodeGPUInfo(ctx context.Context, nodeName string) (*NodeGPUInfo, error) {
-	return c.getNodeGPUInfoByIP(ctx, nodeName, nodeName)
-}
-
-func (c *Client) getNodeGPUInfoByIP(ctx context.Context, nodeName, nodeIP string) (*NodeGPUInfo, error) {
-	// Make HTTP request to node agent
-	nodeAgentURL := fmt.Sprintf("http://%s:8082/status", nodeIP)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, "GET", nodeAgentURL, nil)
+	// Find the node agent pod for this node
+	pods, err := c.clientset.CoreV1().Pods("canhazgpu-system").List(ctx, metav1.ListOptions{
+		LabelSelector: "app=canhazgpu-nodeagent",
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to list node agent pods: %w", err)
 	}
 
-	resp, err := client.Do(req)
+	var targetPod string
+	for _, pod := range pods.Items {
+		if pod.Spec.NodeName == nodeName {
+			targetPod = pod.Name
+			break
+		}
+	}
+
+	if targetPod == "" {
+		return nil, fmt.Errorf("no node agent pod found for node %s", nodeName)
+	}
+
+	// Use Kubernetes API proxy to reach the node agent pod
+	req := c.clientset.CoreV1().RESTClient().Get().
+		Namespace("canhazgpu-system").
+		Resource("pods").
+		SubResource("proxy").
+		Name(fmt.Sprintf("%s:8082", targetPod)).
+		Suffix("status")
+
+	data, err := req.DoRaw(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query node agent: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("node agent returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("failed to proxy request to node agent: %w", err)
 	}
 
-	// Parse response - need to define the structure based on node agent API
+	// Parse response from node agent API
 	var nodeStatus struct {
 		NodeName      string `json:"nodeName"`
 		TotalGPUs     int    `json:"totalGPUs"`
@@ -686,7 +695,7 @@ func (c *Client) getNodeGPUInfoByIP(ctx context.Context, nodeName, nodeIP string
 		} `json:"allocatedGPUs"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&nodeStatus); err != nil {
+	if err := json.Unmarshal(data, &nodeStatus); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
