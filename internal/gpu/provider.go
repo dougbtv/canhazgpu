@@ -33,6 +33,7 @@ func NewProviderManager() *ProviderManager {
 		providers: []GPUProvider{
 			NewNVIDIAProvider(),
 			NewAMDProvider(),
+			NewVirtualProvider(),
 		},
 	}
 }
@@ -47,6 +48,8 @@ func NewProviderManagerFromNames(providerNames []string) *ProviderManager {
 			providers = append(providers, NewNVIDIAProvider())
 		case "amd":
 			providers = append(providers, NewAMDProvider())
+		case "virtual":
+			providers = append(providers, NewVirtualProvider())
 		}
 	}
 

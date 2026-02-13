@@ -33,7 +33,7 @@ Use --force to reinitialize an existing pool (this will clear all reservations).
 func init() {
 	adminCmd.Flags().IntP("gpus", "g", 0, "Number of GPUs available on this machine (required)")
 	adminCmd.Flags().Bool("force", false, "Force reinitialization even if already initialized")
-	adminCmd.Flags().StringP("provider", "p", "", "GPU provider to use (nvidia or amd). If not specified, auto-detect available provider")
+	adminCmd.Flags().StringP("provider", "p", "", "GPU provider to use (nvidia, amd, or virtual). If not specified, auto-detect available provider")
 	if err := adminCmd.MarkFlagRequired("gpus"); err != nil {
 		// This should not happen in practice, but handle it
 		panic(fmt.Sprintf("Failed to mark gpus flag as required: %v", err))
@@ -63,8 +63,8 @@ func runAdmin(ctx context.Context, gpuCount int, force bool, explicitProvider st
 		fmt.Printf("Using explicitly specified GPU provider: %s\n", explicitProvider)
 
 		// Validate provider name
-		if explicitProvider != "nvidia" && explicitProvider != "amd" {
-			return fmt.Errorf("invalid provider '%s'. Valid providers are: nvidia, amd", explicitProvider)
+		if explicitProvider != "nvidia" && explicitProvider != "amd" && explicitProvider != "virtual" {
+			return fmt.Errorf("invalid provider '%s'. Valid providers are: nvidia, amd, virtual", explicitProvider)
 		}
 
 		// Validate that the specified provider is available

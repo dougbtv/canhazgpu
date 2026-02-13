@@ -106,6 +106,17 @@ canhazgpu admin --gpus $(nvidia-smi --list-gpus | wc -l)
 # AMD GPU setup
 canhazgpu admin --gpus $(amd-smi list --json | jq 'length')
 
+# Virtual GPU setup (for k8shazgpu or containerized environments)
+canhazgpu admin --gpus 8 --provider virtual
+
+# Auto-detect selects virtual if no physical providers present
+canhazgpu admin --gpus 4
+
+# All commands work normally with virtual provider
+canhazgpu status
+canhazgpu run --gpus 2 -- python train.py
+canhazgpu reserve --gpus 1 --duration 2h
+
 # Check provider availability
 nvidia-smi --help >/dev/null 2>&1 && echo "NVIDIA available" || echo "NVIDIA not available"
 amd-smi --help >/dev/null 2>&1 && echo "AMD available" || echo "AMD not available"
@@ -279,10 +290,18 @@ Reserved state:
 - **Memory Detection**: Uses `amd-smi metric --json` for memory usage
 - **Validation**: Real-time validation of GPU usage and process ownership
 
+### Virtual GPUs
+- **Requirements**: None (always available)
+- **Use Case**: Kubernetes environments with fake-gpu-operator or simulated GPUs (e.g., k8shazgpu)
+- **Process Detection**: Returns empty results (no physical processes)
+- **Memory Detection**: Returns zero usage (no physical memory)
+- **Validation**: Skipped for virtual GPUs - all GPU management happens through Redis
+
 ### Provider Selection
 - **Auto-detection**: Automatically detects available providers during initialization
-- **Manual Selection**: Use `--provider nvidia` or `--provider amd` to force specific provider
+- **Manual Selection**: Use `--provider nvidia`, `--provider amd`, or `--provider virtual` to force specific provider
 - **Single Provider**: System assumes only one GPU provider type per system
+- **Priority**: Auto-detection prioritizes physical providers (nvidia, amd) over virtual
 
 ## Documentation
 
