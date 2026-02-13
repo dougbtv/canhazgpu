@@ -59,11 +59,12 @@ func main() {
 
 	// Determine GPU count
 	if *gpuCount == 0 {
-		*gpuCount = detectGPUCount()
+		*gpuCount = detectGPUCountFromRedis(ctx, redisClient)
 	}
 
 	if *gpuCount == 0 {
-		klog.Warning("No GPUs detected or GPU count not specified")
+		klog.Warning("No GPUs detected or GPU count not specified, falling back to default")
+		*gpuCount = 1
 	}
 
 	// Generate and write CDI spec
@@ -148,10 +149,16 @@ func main() {
 	klog.Info("Shutdown complete")
 }
 
-func detectGPUCount() int {
-	// TODO: Implement GPU detection using nvidia-smi or similar
-	// For now, return a default value
-	return 1
+func detectGPUCountFromRedis(ctx context.Context, redisClient *redisstate.Client) int {
+	// Read GPU count from Redis (set by canhazgpu admin command)
+	count, err := redisClient.GetGPUCount(ctx)
+	if err != nil {
+		klog.Warningf("Failed to get GPU count from Redis: %v", err)
+		return 0
+	}
+
+	klog.Infof("Detected %d GPUs from Redis configuration", count)
+	return count
 }
 
 func generateCDISpec(gpuCount int, cdiPath string) error {

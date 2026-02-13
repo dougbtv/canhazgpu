@@ -545,8 +545,21 @@ func (c *Client) getGPUSummaryFromClaims(ctx context.Context) (*GPUSummary, erro
 	summary := &GPUSummary{}
 	nodeGPUMap := make(map[string]*NodeGPUInfo)
 
-	// Initialize nodes - assume 1 GPU per ready node for now
-	// In a real implementation, this should come from node labels or node agent query
+	// Get ResourceSlices to determine actual GPU count per node
+	resourceSlices, err := c.resourceClient.ResourceSlices().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ResourceSlices: %w", err)
+	}
+
+	// Build GPU count map from ResourceSlices
+	nodeGPUCount := make(map[string]int)
+	for _, slice := range resourceSlices.Items {
+		if slice.Spec.Driver == "gpu.nvidia.com" && slice.Spec.NodeName != "" {
+			nodeGPUCount[slice.Spec.NodeName] = len(slice.Spec.Devices)
+		}
+	}
+
+	// Initialize nodes with actual GPU counts from ResourceSlices
 	for _, node := range nodes.Items {
 		ready := false
 		for _, condition := range node.Status.Conditions {
@@ -557,14 +570,26 @@ func (c *Client) getGPUSummaryFromClaims(ctx context.Context) (*GPUSummary, erro
 		}
 
 		if ready {
+			gpuCount := nodeGPUCount[node.Name]
+			if gpuCount == 0 {
+				// No ResourceSlices found for this node, skip it
+				continue
+			}
+
+			// Initialize with all GPUs available
+			availableGPUs := make([]int, gpuCount)
+			for i := 0; i < gpuCount; i++ {
+				availableGPUs[i] = i
+			}
+
 			nodeInfo := &NodeGPUInfo{
 				NodeName:      node.Name,
-				TotalGPUs:     1, // Hardcoded for now - should be configurable
-				AvailableGPUs: []int{0}, // Start with GPU 0 available
+				TotalGPUs:     gpuCount,
+				AvailableGPUs: availableGPUs,
 				AllocatedGPUs: []AllocatedGPUInfo{},
 			}
 			nodeGPUMap[node.Name] = nodeInfo
-			summary.TotalGPUs++
+			summary.TotalGPUs += gpuCount
 		}
 	}
 

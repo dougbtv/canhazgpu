@@ -150,6 +150,18 @@ func (c *Client) ReleaseGPUsForClaim(ctx context.Context, claimUID string) error
 	return nil
 }
 
+// GetGPUCount returns the total number of GPUs configured in the pool
+func (c *Client) GetGPUCount(ctx context.Context) (int, error) {
+	gpuCount, err := c.rdb.Get(ctx, types.RedisKeyGPUCount).Int()
+	if err == redis.Nil {
+		return 0, fmt.Errorf("GPU pool not initialized - run 'canhazgpu admin' first")
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get GPU count: %w", err)
+	}
+	return gpuCount, nil
+}
+
 // GetAvailableGPUs returns the list of available GPU IDs
 func (c *Client) GetAvailableGPUs(ctx context.Context) ([]int, error) {
 	// Get total GPU count

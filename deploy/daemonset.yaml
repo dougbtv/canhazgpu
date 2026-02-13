@@ -27,7 +27,7 @@ spec:
         - "--redis-socket=/host/run/redis/redis.sock"
         - "--redis-db=0"
         - "--cdi-path=/var/run/cdi/canhazgpu.json"
-        - "--gpu-count=1"
+        - "--gpu-count=0"  # 0 = auto-detect from Redis
         - "-v=2"
         env:
         - name: NODE_NAME
