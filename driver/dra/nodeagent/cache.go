@@ -432,20 +432,26 @@ func (r *SimpleCacheReconciler) downloadModel(repoId, revision string) error {
 		klog.V(4).Infof("Using HF_TOKEN for authenticated model download")
 	}
 
-	// Download the model using hf CLI
+	// Download the model using hf CLI with real-time progress
 	args := []string{"download", repoId}
 	if revision != "main" && revision != "" {
 		args = append(args, "--revision", revision)
 	}
 
+	klog.Infof("Starting download for model %s (revision: %s)", repoId, revision)
 	cmd := exec.Command("hf", args...)
 	cmd.Env = env
-	output, err := cmd.CombinedOutput()
+
+	// Stream output in real-time for progress visibility
+	cmd.Stdout = &logWriter{prefix: fmt.Sprintf("[model-download %s]", repoId)}
+	cmd.Stderr = &logWriter{prefix: fmt.Sprintf("[model-download %s]", repoId)}
+
+	err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("hf download failed: %v, output: %s", err, string(output))
+		return fmt.Errorf("hf download failed: %v", err)
 	}
 
-	klog.V(4).Infof("Hugging Face download output: %s", string(output))
+	klog.Infof("Successfully completed download for model %s", repoId)
 	return nil
 }
 
@@ -468,49 +474,61 @@ func (r *SimpleCacheReconciler) cloneGitRepo(gitURL, branch, name string, force 
 			klog.Infof("Force update requested for %s, performing fetch and reset", repoDir)
 
 			// Force update: fetch latest and reset to remote HEAD
-			fetchCmd := exec.Command("git", "-C", repoDir, "fetch", "origin", branch)
-			fetchOutput, fetchErr := fetchCmd.CombinedOutput()
+			fetchCmd := exec.Command("git", "-C", repoDir, "fetch", "--progress", "origin", branch)
+			fetchCmd.Stdout = &logWriter{prefix: fmt.Sprintf("[git-fetch %s]", name)}
+			fetchCmd.Stderr = &logWriter{prefix: fmt.Sprintf("[git-fetch %s]", name)}
+			fetchErr := fetchCmd.Run()
 			if fetchErr != nil {
-				klog.V(4).Infof("Git fetch failed, trying fresh clone: %v, output: %s", fetchErr, string(fetchOutput))
+				klog.Infof("Git fetch failed, trying fresh clone: %v", fetchErr)
 				os.RemoveAll(repoDir)
 			} else {
 				// Reset to remote HEAD (handles force pushes)
 				resetCmd := exec.Command("git", "-C", repoDir, "reset", "--hard", fmt.Sprintf("origin/%s", branch))
-				resetOutput, resetErr := resetCmd.CombinedOutput()
+				resetCmd.Stdout = &logWriter{prefix: fmt.Sprintf("[git-reset %s]", name)}
+				resetCmd.Stderr = &logWriter{prefix: fmt.Sprintf("[git-reset %s]", name)}
+				resetErr := resetCmd.Run()
 				if resetErr != nil {
-					klog.V(4).Infof("Git reset failed, trying fresh clone: %v, output: %s", resetErr, string(resetOutput))
+					klog.Infof("Git reset failed, trying fresh clone: %v", resetErr)
 					os.RemoveAll(repoDir)
 				} else {
-					klog.V(4).Infof("Git force update successful: %s", string(resetOutput))
+					klog.Infof("Git force update successful for %s", name)
 					return nil
 				}
 			}
 		} else {
 			// Regular update: try pull
-			klog.V(4).Infof("Repository directory %s exists, updating...", repoDir)
+			klog.Infof("Repository directory %s exists, updating...", repoDir)
 
 			// Change to repo directory and pull latest
-			cmd := exec.Command("git", "-C", repoDir, "pull", "origin", branch)
-			output, err := cmd.CombinedOutput()
+			cmd := exec.Command("git", "-C", repoDir, "pull", "--progress", "origin", branch)
+			cmd.Stdout = &logWriter{prefix: fmt.Sprintf("[git-pull %s]", name)}
+			cmd.Stderr = &logWriter{prefix: fmt.Sprintf("[git-pull %s]", name)}
+			err := cmd.Run()
 			if err != nil {
-				klog.V(4).Infof("Git pull failed, trying fresh clone: %v, output: %s", err, string(output))
+				klog.Infof("Git pull failed, trying fresh clone: %v", err)
 				// Remove directory and do fresh clone
 				os.RemoveAll(repoDir)
 			} else {
-				klog.V(4).Infof("Git pull output: %s", string(output))
+				klog.Infof("Git pull successful for %s", name)
 				return nil
 			}
 		}
 	}
 
-	// Fresh clone
-	cmd := exec.Command("git", "clone", "--branch", branch, "--depth", "1", gitURL, repoDir)
-	output, err := cmd.CombinedOutput()
+	// Fresh clone with real-time progress output
+	klog.Infof("Starting git clone for %s (branch: %s)", gitURL, branch)
+	cmd := exec.Command("git", "clone", "--branch", branch, "--depth", "1", "--progress", gitURL, repoDir)
+
+	// Stream output in real-time for progress visibility
+	cmd.Stdout = &logWriter{prefix: fmt.Sprintf("[git-clone %s]", name)}
+	cmd.Stderr = &logWriter{prefix: fmt.Sprintf("[git-clone %s]", name)}
+
+	err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("git clone failed: %v, output: %s", err, string(output))
+		return fmt.Errorf("git clone failed: %v", err)
 	}
 
-	klog.V(4).Infof("Git clone output: %s", string(output))
+	klog.Infof("Successfully completed git clone for %s", gitURL)
 	return nil
 }
 
@@ -566,16 +584,37 @@ func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
-// pullImage pulls an image using crictl
+// pullImage pulls an image using crictl with real-time progress output
 func (r *SimpleCacheReconciler) pullImage(imageRef string) error {
 	// Use crictl to pull the image via CRI-O socket
 	cmd := exec.Command("crictl", "--runtime-endpoint", "unix:///host/run/crio/crio.sock", "pull", imageRef)
-	output, err := cmd.CombinedOutput()
+
+	// Stream stdout and stderr in real-time for progress visibility
+	cmd.Stdout = &logWriter{prefix: fmt.Sprintf("[image-pull %s]", imageRef)}
+	cmd.Stderr = &logWriter{prefix: fmt.Sprintf("[image-pull %s]", imageRef)}
+
+	klog.Infof("Starting pull for image %s (this may take several minutes for large images)", imageRef)
+
+	err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("crictl pull failed: %v, output: %s", err, string(output))
+		return fmt.Errorf("crictl pull failed: %v", err)
 	}
-	klog.V(4).Infof("crictl pull output: %s", string(output))
+
+	klog.Infof("Successfully completed pull for image %s", imageRef)
 	return nil
+}
+
+// logWriter wraps klog to implement io.Writer for streaming command output
+type logWriter struct {
+	prefix string
+}
+
+func (lw *logWriter) Write(p []byte) (n int, err error) {
+	msg := strings.TrimSpace(string(p))
+	if msg != "" {
+		klog.Infof("%s %s", lw.prefix, msg)
+	}
+	return len(p), nil
 }
 
 // updateNodeCacheStatus creates/updates the NodeCacheStatus

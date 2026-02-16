@@ -227,17 +227,15 @@ func (r *Reconciler) checkImagePresent(ref string) (bool, string, error) {
 	return false, "", nil
 }
 
-// pullImage pulls an image using the container runtime
+// pullImage pulls an image using the container runtime with real-time progress output
 func (r *Reconciler) pullImage(ref string) error {
-	var cmd *exec.Cmd
+	var endpoint string
 
 	switch r.criType {
 	case "crio":
-		cmd = exec.Command("crictl", "pull", ref)
-		cmd.Env = append(os.Environ(), "CRICTL_RUNTIME_ENDPOINT=unix:///host/run/crio/crio.sock")
+		endpoint = "unix:///host/run/crio/crio.sock"
 	case "containerd":
-		cmd = exec.Command("crictl", "pull", ref)
-		cmd.Env = append(os.Environ(), "CRICTL_RUNTIME_ENDPOINT=unix:///host/run/containerd/containerd.sock")
+		endpoint = "unix:///host/run/containerd/containerd.sock"
 	default:
 		return fmt.Errorf("unsupported CRI type: %s", r.criType)
 	}
@@ -245,13 +243,35 @@ func (r *Reconciler) pullImage(ref string) error {
 	// Set timeout for image pull
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to pull image %s: %w (output: %s)", ref, err, string(output))
+	cmd := exec.CommandContext(ctx, "crictl", "pull", ref)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("CRICTL_RUNTIME_ENDPOINT=%s", endpoint))
+
+	// Stream output in real-time for progress visibility
+	cmd.Stdout = &logWriter{prefix: fmt.Sprintf("[image-pull %s]", ref)}
+	cmd.Stderr = &logWriter{prefix: fmt.Sprintf("[image-pull %s]", ref)}
+
+	klog.Infof("Starting pull for image %s (this may take several minutes for large images)", ref)
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to pull image %s: %w", ref, err)
 	}
 
+	klog.Infof("Successfully completed pull for image %s", ref)
 	return nil
+}
+
+// logWriter wraps klog to implement io.Writer for streaming command output
+type logWriter struct {
+	prefix string
+}
+
+func (lw *logWriter) Write(p []byte) (n int, err error) {
+	msg := strings.TrimSpace(string(p))
+	if msg != "" {
+		klog.Infof("%s %s", lw.prefix, msg)
+	}
+	return len(p), nil
 }
 
 // reconcileGitRepo ensures a git repository is cloned and synced
