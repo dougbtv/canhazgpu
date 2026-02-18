@@ -185,7 +185,7 @@ func (info *VLLMCheckoutInfo) detectLocalChanges() error {
 		info.HasLocalChanges = true
 	}
 
-	// Get untracked files
+	// Get untracked files (for display only - not packaged)
 	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard")
 	cmd.Dir = info.WorkingDir
 	output, err = cmd.CombinedOutput()
@@ -194,10 +194,10 @@ func (info *VLLMCheckoutInfo) detectLocalChanges() error {
 	}
 	if len(output) > 0 {
 		info.UntrackedFiles = strings.Split(strings.TrimSpace(string(output)), "\n")
-		info.HasLocalChanges = true
+		// Note: untracked files do NOT set HasLocalChanges - only modified files are packaged
 	}
 
-	// Generate diff data if there are changes
+	// Generate diff data if there are modified files
 	if info.HasLocalChanges {
 		if err := info.generateDiffData(); err != nil {
 			return fmt.Errorf("failed to generate diff data: %w", err)
@@ -207,11 +207,11 @@ func (info *VLLMCheckoutInfo) detectLocalChanges() error {
 	return nil
 }
 
-// generateDiffData creates a comprehensive diff including modified and untracked files
+// generateDiffData creates a diff of modified files only (untracked files are not packaged)
 func (info *VLLMCheckoutInfo) generateDiffData() error {
 	var diffBuilder strings.Builder
 
-	// Add git diff for modified files
+	// Add git diff for modified files only
 	if len(info.ModifiedFiles) > 0 {
 		cmd := exec.Command("git", "diff")
 		cmd.Dir = info.WorkingDir
@@ -224,21 +224,8 @@ func (info *VLLMCheckoutInfo) generateDiffData() error {
 		diffBuilder.WriteString("\n")
 	}
 
-	// Add untracked files content
-	if len(info.UntrackedFiles) > 0 {
-		diffBuilder.WriteString("# Untracked files\n")
-		for _, file := range info.UntrackedFiles {
-			filePath := filepath.Join(info.WorkingDir, file)
-			content, err := os.ReadFile(filePath)
-			if err != nil {
-				// Skip files that can't be read (e.g., binary files, permission issues)
-				continue
-			}
-			diffBuilder.WriteString(fmt.Sprintf("# New file: %s\n", file))
-			diffBuilder.WriteString(string(content))
-			diffBuilder.WriteString("\n\n")
-		}
-	}
+	// Note: Untracked files are NOT included in the diff to avoid hitting ConfigMap size limits
+	// They are collected for display purposes only (shown in summary)
 
 	info.DiffData = diffBuilder.String()
 	return nil

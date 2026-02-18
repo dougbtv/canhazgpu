@@ -122,8 +122,8 @@ The Pod will have access to the cached git repository at /workdir and model cach
 
 			// Create diff ConfigMap if there are local changes
 			if vllmInfo.HasLocalChanges {
-				fmt.Printf("📦 Packaging %d modified and %d untracked files for transport\n",
-					len(vllmInfo.ModifiedFiles), len(vllmInfo.UntrackedFiles))
+				fmt.Printf("📦 Packaging %d modified file(s) for transport (untracked files ignored)\n",
+					len(vllmInfo.ModifiedFiles))
 				if err := vllmInfo.createDiffConfigMap(namespace, claimName); err != nil {
 					return fmt.Errorf("failed to create diff ConfigMap: %w", err)
 				}
